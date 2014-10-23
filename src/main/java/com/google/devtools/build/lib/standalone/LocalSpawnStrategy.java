@@ -64,20 +64,15 @@ public class LocalSpawnStrategy implements SpawnActionContext {
     // All actions therefore depend on the process-wrapper file. Since it's embedded,
     // we don't bother with declaring it as an input.
     List<String> args = new ArrayList<>();
-    if (!OsUtils.isWindows()) {
-      // TODO(bazel-team): process-wrapper seems to work on Windows, but requires
-      // additional setup as it is an msys2 binary, so it needs msys2 DLLs on %PATH%.
-      // Disable it for now to make the setup easier and to avoid further PATH hacks.
-      // Ideally we should have a native implementation of process-wrapper for Windows.
-      args.add(processWrapper.getPathString());
-      args.add("-1"); /* timeout */
-      args.add("0");  /* kill delay. */
 
-      // TODO(bazel-team): use process-wrapper redirection so we don't have to
-      // pass test logs through the Java heap.
-      args.add("-");  /* stdout. */
-      args.add("-");  /* stderr. */
-    }
+    args.add(processWrapper.getPathString());
+    args.add("-1"); /* timeout */
+    args.add("0");  /* kill delay. */
+
+    // TODO(bazel-team): use process-wrapper redirection so we don't have to
+    // pass test logs through the Java heap.
+    args.add("-");  /* stdout. */
+    args.add("-");  /* stderr. */
     args.addAll(spawn.getArguments());
 
     String cwd = executor.getExecRoot().getPathString();
