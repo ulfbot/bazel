@@ -93,11 +93,15 @@ def java_binary_impl(ctx):
     content = "Main-Class: " + main_class + "\n",
     executable = False)
 
+  javapath = "/usr/bin/"
+  if ctx.configuration.fragment(cpp).compiler.startswith("windows_"):
+    javapath = "c:/program\ files/java/jdk1.8.0_20/bin/"
+
   # Cleaning build output directory
   cmd = "set -e;rm -rf " + build_output + ";mkdir " + build_output + "\n"
   for jar in jars:
     cmd += "unzip -qn " + jar.path + " -d " + build_output + "\n"
-  cmd += ("/usr/bin/jar cmf " + manifest.path + " " +
+  cmd += (javapath + "jar cmf " + manifest.path + " " +
          deploy_jar.path + " -C " + build_output + " .\n" +
          "touch " + build_output + "\n")
 
