@@ -159,7 +159,7 @@ class RunfilesCreator {
       }
       std::string link(buf, s-buf);
       const char *target = s+1;
-      if (!allow_relative && target[0] != '\0' && target[0] != '/') {
+      if (!allow_relative && target[0] != '\0' && target[0] != '/' && target[1] != ':') {
         DIE("expected absolute path at line %d: '%s'\n", lineno, buf);
       }
 
