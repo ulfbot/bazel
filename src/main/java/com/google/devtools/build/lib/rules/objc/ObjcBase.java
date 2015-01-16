@@ -14,17 +14,18 @@
 
 package com.google.devtools.build.lib.rules.objc;
 
+import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.HDRS_TYPE;
+
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.FilesToRunProvider;
-import com.google.devtools.build.lib.view.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.view.RuleContext;
 
 import java.util.List;
 
@@ -35,46 +36,22 @@ final class ObjcBase {
   private ObjcBase() {}
 
   /**
-   * Object that supplies tools used by rules that inherit from
-   * {@link ObjcRuleClasses.ObjcBaseRule}.
-   */
-  static final class Tools {
-    private final RuleContext ruleContext;
-
-    Tools(RuleContext ruleContext) {
-      this.ruleContext = Preconditions.checkNotNull(ruleContext);
-    }
-
-    Artifact actooloribtoolzipDeployJar() {
-      return ruleContext.getPrerequisiteArtifact("$actooloribtoolzip_deploy", Mode.HOST);
-    }
-
-    Artifact momczipDeployJar() {
-      return ruleContext.getPrerequisiteArtifact("$momczip_deploy", Mode.HOST);
-    }
-
-    FilesToRunProvider xcodegen() {
-      return ruleContext.getExecutablePrerequisite("$xcodegen", Mode.HOST);
-    }
-
-    FilesToRunProvider plmerge() {
-      return ruleContext.getExecutablePrerequisite("$plmerge", Mode.HOST);
-    }
-  }
-
-  /**
    * Provides a way to access attributes that are common to all rules that inherit from
    * {@link ObjcRuleClasses.ObjcBaseRule}.
    */
   static final class Attributes {
     private final RuleContext ruleContext;
+    private final ObjcSdkFrameworks.Attributes sdkFrameworkAttributes;
 
     Attributes(RuleContext ruleContext) {
       this.ruleContext = Preconditions.checkNotNull(ruleContext);
+      this.sdkFrameworkAttributes = new ObjcSdkFrameworks.Attributes(ruleContext);
     }
 
     ImmutableList<Artifact> hdrs() {
-      return ruleContext.getPrerequisiteArtifacts("hdrs", Mode.TARGET);
+      return ruleContext.getPrerequisiteArtifacts("hdrs", Mode.TARGET)
+          .errorsForNonMatching(HDRS_TYPE)
+          .list();
     }
 
     Iterable<PathFragment> includes() {
@@ -83,20 +60,28 @@ final class ObjcBase {
           PathFragment.TO_PATH_FRAGMENT);
     }
 
+    Iterable<PathFragment> sdkIncludes() {
+      return Iterables.transform(
+          ruleContext.attributes().get("sdk_includes", Type.STRING_LIST),
+          PathFragment.TO_PATH_FRAGMENT);
+    }
+
     ImmutableList<Artifact> assetCatalogs() {
-      return ruleContext.getPrerequisiteArtifacts("asset_catalogs", Mode.TARGET);
+      return ruleContext.getPrerequisiteArtifacts("asset_catalogs", Mode.TARGET).list();
     }
 
     ImmutableList<Artifact> strings() {
-      return ruleContext.getPrerequisiteArtifacts("strings", Mode.TARGET);
+      return ruleContext.getPrerequisiteArtifacts("strings", Mode.TARGET).list();
     }
 
     ImmutableList<Artifact> xibs() {
-      return ruleContext.getPrerequisiteArtifacts("xibs", Mode.TARGET);
+      return ruleContext.getPrerequisiteArtifacts("xibs", Mode.TARGET)
+          .errorsForNonMatching(ObjcRuleClasses.XIB_TYPE)
+          .list();
     }
 
     ImmutableList<Artifact> storyboards() {
-      return ruleContext.getPrerequisiteArtifacts("storyboards", Mode.TARGET);
+      return ruleContext.getPrerequisiteArtifacts("storyboards", Mode.TARGET).list();
     }
 
     /**
@@ -104,24 +89,29 @@ final class ObjcBase {
      * automatically.
      */
     ImmutableSet<SdkFramework> sdkFrameworks() {
-      ImmutableSet.Builder<SdkFramework> result = new ImmutableSet.Builder<>();
-      result.addAll(ObjcRuleClasses.AUTOMATIC_SDK_FRAMEWORKS);
-      for (String explicit : ruleContext.attributes().get("sdk_frameworks", Type.STRING_LIST)) {
-        result.add(new SdkFramework(explicit));
-      }
-      return result.build();
+      return sdkFrameworkAttributes.sdkFrameworks();
     }
 
+    /**
+     * Returns the value of the weak_sdk_frameworks attribute.
+     */
+    ImmutableSet<SdkFramework> weakSdkFrameworks() {
+      return sdkFrameworkAttributes.weakSdkFrameworks();
+    }
+
+    /**
+     * Returns the value of the sdk_dylibs attribute.
+     */
     ImmutableSet<String> sdkDylibs() {
-      return ImmutableSet.copyOf(ruleContext.attributes().get("sdk_dylibs", Type.STRING_LIST));
+      return sdkFrameworkAttributes.sdkDylibs();
     }
 
     ImmutableList<Artifact> resources() {
-      return ruleContext.getPrerequisiteArtifacts("resources", Mode.TARGET);
+      return ruleContext.getPrerequisiteArtifacts("resources", Mode.TARGET).list();
     }
 
     ImmutableList<Artifact> datamodels() {
-      return ruleContext.getPrerequisiteArtifacts("datamodels", Mode.TARGET);
+      return ruleContext.getPrerequisiteArtifacts("datamodels", Mode.TARGET).list();
     }
 
     /**
@@ -146,39 +136,24 @@ final class ObjcBase {
     }
   }
 
-  static IntermediateArtifacts intermediateArtifacts(RuleContext ruleContext) {
-    return new IntermediateArtifacts(
-        ruleContext.getAnalysisEnvironment(), ruleContext.getBinOrGenfilesDirectory(),
-        ruleContext.getLabel());
-  }
-
-  static ObjcActionsBuilder actionsBuilder(RuleContext ruleContext) {
-    return new ObjcActionsBuilder(ruleContext, intermediateArtifacts(ruleContext),
-        objcConfiguration(ruleContext), ruleContext.getConfiguration(), ruleContext);
-  }
-
-  static ObjcConfiguration objcConfiguration(RuleContext ruleContext) {
-    return ruleContext.getConfiguration().getFragment(ObjcConfiguration.class);
-  }
-
   static void registerActions(
       RuleContext ruleContext, XcodeProvider xcodeProvider, Storyboards storyboards) {
-    ObjcActionsBuilder actionsBuilder = actionsBuilder(ruleContext);
-    IntermediateArtifacts intermediateArtifacts = intermediateArtifacts(ruleContext);
+    ObjcActionsBuilder actionsBuilder = ObjcRuleClasses.actionsBuilder(ruleContext);
+    IntermediateArtifacts intermediateArtifacts =
+        ObjcRuleClasses.intermediateArtifacts(ruleContext);
     Attributes attributes = new Attributes(ruleContext);
 
-    Tools tools = new Tools(ruleContext);
+    ObjcRuleClasses.Tools tools = new ObjcRuleClasses.Tools(ruleContext);
     actionsBuilder.registerResourceActions(
         tools,
         new ObjcActionsBuilder.StringsFiles(
             CompiledResourceFile.fromStringsFiles(intermediateArtifacts, attributes.strings())),
-        new ObjcActionsBuilder.XibFiles(
-            CompiledResourceFile.fromXibFiles(intermediateArtifacts, attributes.xibs())),
+        new XibFiles(attributes.xibs()),
         Xcdatamodels.xcdatamodels(intermediateArtifacts, attributes.datamodels()));
     actionsBuilder.registerXcodegenActions(
         tools,
         ruleContext.getImplicitOutputArtifact(ObjcRuleClasses.PBXPROJ),
-        xcodeProvider);
+        ImmutableList.of(xcodeProvider));
     for (Artifact storyboardInput : storyboards.getInputs()) {
       actionsBuilder.registerIbtoolzipAction(
           tools, storyboardInput, intermediateArtifacts.compiledStoryboardZip(storyboardInput));

@@ -23,6 +23,16 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Root;
+import com.google.devtools.build.lib.analysis.AnalysisUtils;
+import com.google.devtools.build.lib.analysis.ConfigurationMakeVariableContext;
+import com.google.devtools.build.lib.analysis.FilesToRunProvider;
+import com.google.devtools.build.lib.analysis.LabelExpander;
+import com.google.devtools.build.lib.analysis.LabelExpander.NotUniqueExpansionException;
+import com.google.devtools.build.lib.analysis.MakeVariableExpander.ExpansionException;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition;
@@ -43,17 +53,6 @@ import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.syntax.SkylarkModule;
 import com.google.devtools.build.lib.syntax.SkylarkType;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.AnalysisUtils;
-import com.google.devtools.build.lib.view.ConfigurationMakeVariableContext;
-import com.google.devtools.build.lib.view.FilesToRunProvider;
-import com.google.devtools.build.lib.view.LabelExpander;
-import com.google.devtools.build.lib.view.LabelExpander.NotUniqueExpansionException;
-import com.google.devtools.build.lib.view.MakeVariableExpander.ExpansionException;
-import com.google.devtools.build.lib.view.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.TransitiveInfoCollection;
-import com.google.devtools.build.lib.view.TransitiveInfoProvider;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -61,7 +60,6 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
 
 import javax.annotation.Nullable;
 
@@ -74,7 +72,7 @@ import javax.annotation.Nullable;
     + "you create a rule.")
 public final class SkylarkRuleContext {
 
-  public static final String PROVIDER_CLASS_PREFIX = "com.google.devtools.build.lib.view.";
+  public static final String PROVIDER_CLASS_PREFIX = "com.google.devtools.build.lib.";
 
   static final LoadingCache<String, Class<?>> classCache = CacheBuilder.newBuilder()
       .initialCapacity(10)
@@ -216,7 +214,7 @@ public final class SkylarkRuleContext {
           fileBuilder.put(skyname, Environment.NONE);
         }
       }
-      filesBuilder.put(skyname, ruleContext.getPrerequisiteArtifacts(a.getName(), mode));
+      filesBuilder.put(skyname, ruleContext.getPrerequisiteArtifacts(a.getName(), mode).list());
       targetsBuilder.put(skyname, SkylarkList.list(
           ruleContext.getPrerequisites(a.getName(), mode), TransitiveInfoCollection.class));
       if (type == Type.LABEL) {
@@ -255,27 +253,6 @@ public final class SkylarkRuleContext {
    */
   public RuleContext getRuleContext() {
     return ruleContext;
-  }
-
-  // TODO(bazel-team): of course this is a temporary solution. Eventually the Transitive
-  // Info Providers too have to be implemented using the Build Extension Language.
-  /**
-   * Returns all the providers of the given type. Type has to be the Transitive Info Provider's
-   * canonical name after 'com.google.devtools.build.lib.view.', e.g.
-   * 'go.GoContextProvider'.
-   *
-   * <p>See {@link RuleContext#getPrerequisites(String, Mode, Class)}.
-   */
-  @SkylarkCallable(doc = "")
-  public Iterable<? extends TransitiveInfoProvider> targets(
-      String attributeName, String type) throws FuncallException {
-    try {
-      Class<? extends TransitiveInfoProvider> convertedClass =
-          classCache.get(type).asSubclass(TransitiveInfoProvider.class);
-      return ruleContext.getPrerequisites(attributeName, getMode(attributeName), convertedClass);
-    } catch (ExecutionException e) {
-      throw new FuncallException("Unknown Transitive Info Provider " + type);
-    }
   }
 
   private Mode getMode(String attributeName) {
@@ -379,16 +356,6 @@ public final class SkylarkRuleContext {
     return ruleContext.getConfiguration().getConfiguration(ConfigurationTransition.DATA);
   }
 
-  @SkylarkCallable(doc = "Signals a warning error with the given message.")
-  public void warning(String message) {
-    ruleContext.ruleWarning(message);
-  }
-
-  @SkylarkCallable(doc = "Signals an attribute warning with the given attribute and message.")
-  public void warning(String attrName, String message) {
-    ruleContext.attributeWarning(attrName, message);
-  }
-
   @SkylarkCallable(structField = true,
       doc = "A <code>struct</code> containing all the output files."
           + " The struct is generated the following way:<br>"
@@ -467,7 +434,7 @@ public final class SkylarkRuleContext {
     return AnalysisUtils.getMiddlemanFor(ruleContext, attribute);
   }
 
-  @SkylarkCallable(doc = "hidden = true")
+  @SkylarkCallable(doc = "", hidden = true)
   public boolean checkPlaceholders(String template, List<String> allowedPlaceholders) {
     List<String> actualPlaceHolders = new LinkedList<>();
     Set<String> allowedPlaceholderSet = ImmutableSet.copyOf(allowedPlaceholders);

@@ -1,224 +1,3 @@
-load("rules/genproto", "genproto")
-
-load("rules/java_rules_oss", "java_library", "java_binary", "java_test")
-
-# The file assumes there is a directory (or symlink) src/javadir.
-# Use this command to use local java:
-#   ln -s $(which java | sed 's_/bin/java'__) src/javadir
-
-JAVA_HOME = "src/javadir"
-
-# Proto
-
-[genproto(
-    name = "proto_" + proto_file,
-    src = "main/protobuf/" + proto_file + ".proto",
-) for proto_file in [
-    "build",
-    "crosstool_config",
-    "extra_actions_base",
-    "test_status",
-    "bundlemerge",
-    "xcodegen",
-]]
-
-# Java
-
-# TODO(bazel-team): Split this into multiple rules.
-java_library(
-    name = "xcode-common",
-    srcs = glob([
-        "tools/xcode-common/java/com/google/devtools/build/xcode/util/*.java",
-        "tools/xcode-common/java/com/google/devtools/build/xcode/common/*.java",
-    ]),
-    jars = [
-        "//third_party",
-    ],
-)
-
-java_library(
-    name = "bazel-core",
-    srcs = glob([
-        "main/**/*.java",
-    ]),
-    jars = [
-        "//third_party",
-    ],
-    deps = [
-        ":proto_build",
-        ":proto_bundlemerge",
-        ":proto_crosstool_config",
-        ":proto_extra_actions_base",
-        ":proto_test_status",
-        ":proto_xcodegen",
-        ":xcode-common",
-    ],
-)
-
-java_binary(
-    name = "bazel-main",
-    main_class = "com.google.devtools.build.lib.bazel.BazelMain",
-    deps = [
-        ":bazel-core",
-    ],
-)
-
-# C++
-
-cc_binary(
-    name = "process-wrapper",
-    srcs = ["main/tools/process-wrapper.c"],
-    copts = ["-std=c99"],
-)
-
-cc_binary(
-    name = "build-runfiles",
-    srcs = ["main/tools/build-runfiles.cc"],
-)
-
-link_jni_cmd = "DIR=%s && cp $${DIR}/jni.h $(location jni.h) && cp $${DIR}/%s/jni_md.h $(location jni_md.h)"
-
-genrule(
-    name = "copy_link_jni_headers",
-    srcs = [],
-    outs = [
-        "jni.h",
-        "jni_md.h",
-    ],
-    cmd = select({
-        ":darwin": link_jni_cmd % ("/Library/Java/JavaVirtualMachines/jdk1.8.0_20.jdk/Contents/Home/include", "darwin"),
-        "//conditions:default": link_jni_cmd % ("/usr/lib/jvm/java-7-openjdk-amd64/include", "linux"),
-    }),
-)
-
-LIBARCHIVE_FILES = [
-    "libarchive.a",
-    "liblzo2.a",
-    "liblzma.a",
-    "libcharset.a",
-    "libbz2.a",
-    "libxml2.a",
-    "libz.a",
-    "libiconv.a",
-]
-
-genrule(
-    name = "copy_static_libarchive",
-    srcs = [],
-    outs = LIBARCHIVE_FILES,
-    cmd = select({
-        ":darwin": "cp " + " ".join(["/opt/local/lib/" + x for x in LIBARCHIVE_FILES]) + " $(@D)",
-        "//conditions:default": "touch $(OUTS)",
-    }),
-)
-
-cc_binary(
-    name = "libunix.so",
-    srcs = select({
-        ":darwin": [
-            "main/native/localsocket.cc",
-            "main/native/process.cc",
-            "main/native/unix_jni.cc",
-            "main/native/unix_jni_darwin.cc",
-            "jni.h",
-            "jni_md.h",
-        ],
-        "//conditions:default": [
-            "main/native/localsocket.cc",
-            "main/native/process.cc",
-            "main/native/unix_jni.cc",
-            "main/native/unix_jni_linux.cc",
-            "jni.h",
-            "jni_md.h",
-        ],
-    }),
-    copts = [
-        "-fPIC",
-        "-DBLAZE_JAVA_CPU=\"k8\"",
-        "-DBLAZE_OPENSOURCE=1",
-    ],
-    includes = [
-        ".",  # for the jni headers
-        "main/cpp",
-    ],
-    linkshared = 1,
-    deps = [
-        ":md5",
-    ],
-)
-
-cc_library(
-    name = "util",
-    srcs = [
-        "main/cpp/util/numbers.cc",
-        "main/cpp/util/port.cc",
-        "main/cpp/util/strings.cc",
-    ],
-    hdrs = [
-        "main/cpp/util/numbers.h",
-        "main/cpp/util/port.h",
-        "main/cpp/util/strings.h",
-    ],
-    copts = [
-        "-DBLAZE_OPENSOURCE=1",
-    ],
-    includes = [
-        "main/cpp",
-    ],
-)
-
-cc_library(
-    name = "md5",
-    srcs = ["main/cpp/util/md5.cc"],
-    hdrs = ["main/cpp/util/md5.h"],
-    includes = ["main/cpp"],
-)
-
-cc_binary(
-    name = "client",
-    srcs = select({
-        ":darwin": [
-            "main/cpp/blaze.cc",
-            "main/cpp/blaze_startup_options.cc",
-            "main/cpp/blaze_startup_options_common.cc",
-            "main/cpp/blaze_util.cc",
-            "main/cpp/blaze_util_darwin.cc",
-            "main/cpp/option_processor.cc",
-            "main/cpp/util/file.cc",
-            ":copy_static_libarchive",
-        ],
-        "//conditions:default": [
-            "main/cpp/blaze.cc",
-            "main/cpp/blaze_startup_options.cc",
-            "main/cpp/blaze_startup_options_common.cc",
-            "main/cpp/blaze_util.cc",
-            "main/cpp/blaze_util_linux.cc",
-            "main/cpp/option_processor.cc",
-            "main/cpp/util/file.cc",
-        ],
-    }),
-    copts = [
-        "-DBLAZE_JAVA_CPU=\\\"k8\\\"",
-        "-DBLAZE_OPENSOURCE=1",
-        "-I/opt/local/include",
-    ],
-    includes = [
-        "main/cpp",
-    ],
-    linkopts = select({
-        ":darwin": [
-        ],
-        "//conditions:default": [
-            "-larchive",
-            "-lrt",
-        ],
-    }),
-    deps = [
-        ":md5",
-        ":util",
-    ],
-)
-
 # Packaging
 
 genrule(
@@ -228,36 +7,28 @@ genrule(
     executable = 1,
 )
 
-# TODO: The jar file name in the client needs to match this. Can we automate that?
-genrule(
-    name = "rename-bazel-jar",
-    srcs = ["bazel-main_deploy.jar"],
-    outs = ["libblaze.jar"],
-    cmd = "cp $< $@",
-)
-
-# HACK for Mac: copy libunix.so to libunix.dylib. We'll need to come up with a
-# way to support platform-specific dynamic library extensions.
-genrule(
-    name = "mac-compat",
-    srcs = ["libunix.so"],
-    outs = ["libunix.dylib"],
-    cmd = "cp $< $@",
-)
-
 md5_cmd = "set -e -o pipefail && cat $(SRCS) | %s | awk '{ print $$1; }' > $@"
+
+# TODO(bazel-team): find a better way to handle dylib extensions.
+filegroup(
+    name = "libunix",
+    srcs = select({
+        ":darwin": ["//src/main/native:libunix.dylib"],
+        "//conditions:default": ["//src/main/native:libunix.so"],
+    }),
+    visibility = ["//src/test/java:__pkg__"],
+)
 
 genrule(
     name = "install_base_key-file",
     srcs = [
-        "client",
-        "libblaze.jar",
-        "libunix.so",
-        "libunix.dylib",
-        "build-runfiles",
-        "process-wrapper",
+        "//src/main/java:bazel-main_deploy.jar",
+        "//src/main/cpp:client",
+        ":libunix",
+        "//src/main/tools:build-runfiles",
+        "//src/main/tools:process-wrapper",
         "client_info",
-        "main/tools/build_interface_so",
+        "//src/main/tools:build_interface_so",
     ],
     outs = ["install_base_key"],
     cmd = select({
@@ -269,127 +40,49 @@ genrule(
 genrule(
     name = "package-zip",
     srcs = [
-        "libblaze.jar",
-        "libunix.so",
-        "libunix.dylib",
-        "build-runfiles",
-        "process-wrapper",
+        "//src/main/java:bazel-main_deploy.jar",
+        # The jar must the first in the zip file because the client launcher
+        # looks for the first entry in the zip file for the java server.
+        "//src/main/cpp:client",
+        ":libunix",
+        "//src/main/tools:build-runfiles",
+        "//src/main/tools:process-wrapper",
         "client_info",
-        "main/tools/build_interface_so",
+        "//src/main/tools:build_interface_so",
         "install_base_key",
     ],
     outs = ["package.zip"],
-    cmd = "zip -qj $@ $(SRCS)",
+    # Terrible hack to remove timestamps in the zip file
+    cmd = "mkdir $(@D)/package-zip && " +
+          "cp $(SRCS) $(@D)/package-zip && " +
+          "touch -t 198001010000.00 $(@D)/package-zip/* && " +
+          "zip -qj $@ $(@D)/package-zip/* && " +
+          "rm -fr $(@D)/package-zip",
 )
 
 genrule(
     name = "bazel-bin",
     srcs = [
-        "client",
+        "//src/main/cpp:client",
         "package-zip",
     ],
     outs = ["bazel"],
-    cmd = "cat client package-zip > $@ && zip -qA $@",
+    cmd = "cat $(location //src/main/cpp:client) package-zip > $@ && zip -qA $@",
     executable = 1,
+    output_to_bindir = 1,
+)
+
+filegroup(
+    name = "tools",
+    srcs = [
+        "//src/java_tools/buildjar:JavaBuilder_deploy.jar",
+        "//src/java_tools/singlejar:SingleJar_deploy.jar",
+        "//third_party/ijar",
+    ],
 )
 
 config_setting(
     name = "darwin",
     values = {"cpu": "darwin"},
-)
-
-# Tests
-
-java_library(
-    name = "testutil",
-    srcs = glob([
-        "test/java/com/google/devtools/build/lib/testutil/*.java",
-    ]),
-    jars = [
-        ":bazel-core",
-        "//third_party",
-        "//third_party:third_party_test_utils",
-    ],
-)
-
-java_test(
-    name = "skyframe_test",
-    srcs = glob([
-        "test/java/com/google/devtools/build/skyframe/*.java",
-    ]),
-    args = ["com.google.devtools.build.skyframe.AllTests"],
-    jars = [
-        "//third_party",
-        "//third_party:third_party_test_utils",
-    ],
-    deps = [
-        ":bazel-core",
-        ":testutil",
-    ],
-)
-
-java_test(
-    name = "options_test",
-    srcs = glob([
-        "test/java/com/google/devtools/common/options/*.java",
-    ]),
-    args = ["com.google.devtools.common.options.AllTests"],
-    jars = [
-        "//third_party",
-        "//third_party:third_party_test_utils",
-    ],
-    deps = [
-        ":bazel-core",
-        ":testutil",
-    ],
-)
-
-# unfortunately, this needs to load libunix.so, which is not supported
-# by java_rules_oss, so no proper test yet.  Workaround:
-
-"""
-B=$(pwd)/bazel-genfiles/src/bazel
-$B build -s src:foundations_test
-
-BIN=$($B info blaze-bin)/src
-export TEST_SRCDIR=$BIN/foundations_test.runfiles
-(cd $TEST_SRCDIR &&  java -Djava.library.path=$BIN/
-  -jar $BIN/foundations_test_deploy.jar
-  "com.google.devtools.build.lib.AllTests"; )
-"""
-
-test_prefix = "test/java/com/google/devtools/build/lib"
-
-java_test(
-    name = "foundations_test",
-    srcs = glob(
-        ["%s/%s" % (test_prefix, p) for p in [
-            "concurrent/*.java",
-            "collect/*.java",
-            "collect/nestedset/*.java",
-            "events/*.java",
-            "testutiltests/*.java",
-            "unix/*.java",
-            "util/*.java",
-            "util/io/*.java",
-            "vfs/*.java",
-            "vfs/util/*.java",
-            "vfs/inmemoryfs/*.java",
-            "AllTests.java",
-        ]],
-        # java_rules_oss doesn't support resource loading.
-        exclude = [test_prefix + "/util/ResourceFileLoaderTest.java"],
-    ),
-    args = ["com.google.devtools.build.lib.AllTests"],
-    data = glob([
-        test_prefix + "/vfs/*.zip",
-    ]),
-    jars = [
-        "//third_party",
-        "//third_party:third_party_test_utils",
-    ],
-    deps = [
-        ":bazel-core",
-        ":testutil",
-    ],
+    visibility = ["//visibility:public"],
 )

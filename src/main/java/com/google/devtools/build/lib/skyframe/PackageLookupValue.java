@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
+import com.google.common.base.Preconditions;
 import com.google.devtools.build.lib.packages.PackageIdentifier;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -39,7 +40,11 @@ abstract class PackageLookupValue implements SkyValue {
     INVALID_PACKAGE_NAME,
 
     // The package is considered deleted because of --deleted_packages.
-    DELETED_PACKAGE
+    DELETED_PACKAGE,
+
+    // The //external package could not be loaded, either because the WORKSPACE file could not be
+    // parsed or the packages it references cannot be loaded.
+    NO_EXTERNAL_PACKAGE
   }
 
   protected PackageLookupValue() {
@@ -51,6 +56,10 @@ abstract class PackageLookupValue implements SkyValue {
 
   public static PackageLookupValue noBuildFile() {
     return NoBuildFilePackageLookupValue.INSTANCE;
+  }
+
+  public static PackageLookupValue noExternalPackage() {
+    return NoExternalPackageLookupValue.INSTANCE;
   }
 
   public static PackageLookupValue invalidPackageName(String errorMsg) {
@@ -85,6 +94,7 @@ abstract class PackageLookupValue implements SkyValue {
   abstract String getErrorMsg();
 
   static SkyKey key(PathFragment directory) {
+    Preconditions.checkArgument(!directory.isAbsolute(), directory);
     return key(PackageIdentifier.createInDefaultRepo(directory));
   }
 
@@ -164,6 +174,25 @@ abstract class PackageLookupValue implements SkyValue {
     @Override
     String getErrorMsg() {
       return "BUILD file not found on package path";
+    }
+  }
+
+  private static class NoExternalPackageLookupValue extends UnsuccessfulPackageLookupValue {
+
+    public static final NoExternalPackageLookupValue INSTANCE =
+        new NoExternalPackageLookupValue();
+
+    private NoExternalPackageLookupValue() {
+    }
+
+    @Override
+    ErrorReason getErrorReason() {
+      return ErrorReason.NO_EXTERNAL_PACKAGE;
+    }
+
+    @Override
+    String getErrorMsg() {
+      return "Error loading the //external package";
     }
   }
 

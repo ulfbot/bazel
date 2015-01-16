@@ -30,8 +30,6 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
-import org.joda.time.DateTime;
-
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
@@ -43,7 +41,7 @@ import java.util.logging.Logger;
  * Web server for monitoring blaze commands status.
  */
 public class WebStatusServerModule extends BlazeModule {
-  private static final String LAST_TEST_URI = "/tests/last";
+  static final String LAST_TEST_URI = "/tests/last";
   // 100 is an arbitrary limit; it seems like a reasonable size for history and it's okay to change 
   // it
   private static final int MAX_TESTS_STORED = 100;  
@@ -51,7 +49,6 @@ public class WebStatusServerModule extends BlazeModule {
   private HttpServer server;
   private boolean running = false;
   private BlazeServerStartupOptions serverOptions;
-  private RawDataHandler lastCommandHandler;
   private static final Logger LOG =
       Logger.getLogger(WebStatusServerModule.class.getCanonicalName());
   private int port;
@@ -60,7 +57,6 @@ public class WebStatusServerModule extends BlazeModule {
   private WebStatusEventCollector collector;
   @SuppressWarnings("unused")
   private IndexPageHandler indexHandler;
-  private int commandsRun = 0;
 
   @Override
   public Iterable<Class<? extends OptionsBase>> getStartupOptions() {
@@ -79,7 +75,7 @@ public class WebStatusServerModule extends BlazeModule {
     try {
       server = HttpServer.create(new InetSocketAddress(port), 0);
       serveStaticContent();
-      lastCommandHandler = new RawDataHandler("No commands ran yet.");
+      TextHandler lastCommandHandler = new TextHandler("No commands ran yet.");
       server.createContext("/last", lastCommandHandler);
       server.setExecutor(null);
       server.start();
@@ -98,46 +94,33 @@ public class WebStatusServerModule extends BlazeModule {
     if (!running) {
       return;
     }
-
-    WebStatusBuildLog currentBuild = new WebStatusBuildLog();
-    collector = new WebStatusEventCollector(blazeRuntime.getEventBus(), currentBuild);
-    DateTime currentTime = new DateTime();
-    lastCommandHandler.response = "Starting command...\n";
-    lastCommandHandler.buildLog = currentBuild;
-    lastCommandHandler.command = command;
-    lastCommandHandler.startTime = currentTime;
+    collector =
+        new WebStatusEventCollector(blazeRuntime.getEventBus(), blazeRuntime.getReporter(), this);
+  }
+  
+  public void commandStarted() {
+    WebStatusBuildLog currentBuild = collector.getBuildLog();
 
     if (testsRan.size() == MAX_TESTS_STORED) {
       TestStatusHandler oldestTest = testsRan.removeLast();
       oldestTest.deregister();
     }
-    
-    TestStatusHandler lastTest = new TestStatusHandler(server, commandsRun, currentBuild);
+
+    TestStatusHandler lastTest = new TestStatusHandler(server, currentBuild);
+    testsRan.add(lastTest);
+
     lastTest.overrideURI(LAST_TEST_URI);
-    testsRan.addFirst(lastTest);
-
-    commandsRun += 1;
   }
-
-  @Override
-  public void afterCommand() {
-    if (!running) {
-      return;
-    }
-    DateTime currentTime = new DateTime();
-    lastCommandHandler.response = "Command finished...\n";
-    lastCommandHandler.endTime = currentTime;
-  }
-
+  
   private void serveStaticContent() {
     StaticResourceHandler testjs =
         StaticResourceHandler.createFromRelativePath("static/test.js", "application/javascript");
     StaticResourceHandler indexjs =
         StaticResourceHandler.createFromRelativePath("static/index.js", "application/javascript");
     StaticResourceHandler d3 = StaticResourceHandler.createFromAbsolutePath(
-        "/third_party/javascript/d3/d3-js.js", "application/javascript");
+        "third_party/javascript/d3/d3-js.js", "application/javascript");
     StaticResourceHandler jquery = StaticResourceHandler.createFromAbsolutePath(
-        "/third_party/javascript/jquery/v2_0_3/jquery_uncompressed.jslib",
+        "third_party/javascript/jquery/v2_0_3/jquery_uncompressed.jslib",
         "application/javascript");
     StaticResourceHandler testFrontend =
         StaticResourceHandler.createFromRelativePath("static/test.html", "text/html");
@@ -149,41 +132,25 @@ public class WebStatusServerModule extends BlazeModule {
     server.createContext(LAST_TEST_URI, testFrontend);
   }
 
-  /**
-   *
-   * Dumps data collected by server.
-   */
-  private static class RawDataHandler implements HttpHandler {
-    public DateTime endTime;
-    private DateTime startTime;
-    private Command command;
-    private WebStatusBuildLog buildLog;
+  private static class TextHandler implements HttpHandler {
     private String response;
 
-    private RawDataHandler(String response) {
+    private TextHandler(String response) {
       this.response = response;
     }
 
     @Override
-    public void handle(HttpExchange t) throws IOException {
-      StringBuilder builder = new StringBuilder(response);
-      if (startTime != null) {
-        builder.append(startTime.toString());
-      }
-      if (command != null) {
-        builder.append(command.toString());
-      }
-      if (buildLog != null) {
-        builder.append(buildLog.getCommandInfo().toString());
-      }
-      if (endTime != null) {
-        builder.append(endTime.toString());
-      }
-      String fullResponse = builder.toString();
-      t.sendResponseHeaders(200, fullResponse.length());
-      OutputStream os = t.getResponseBody();
-      os.write(fullResponse.getBytes());
+    public void handle(HttpExchange exchange) throws IOException {
+      exchange.getResponseHeaders().put("Content-Type", ImmutableList.of("text/plain"));
+      exchange.sendResponseHeaders(200, response.length());
+      OutputStream os = exchange.getResponseBody();
+      os.write(response.getBytes());
       os.close();
     }
   }
+
+  public int getPort() {
+    return port;
+  }
 }
+

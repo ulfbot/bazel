@@ -14,6 +14,8 @@
 
 package com.google.devtools.build.lib.skyframe;
 
+import static com.google.devtools.build.lib.syntax.Environment.NONE;
+
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.cmdline.LabelValidator;
 import com.google.devtools.build.lib.events.Event;
@@ -23,9 +25,11 @@ import com.google.devtools.build.lib.packages.ExternalPackage.ExternalPackageBui
 import com.google.devtools.build.lib.packages.ExternalPackage.ExternalPackageBuilder.NoSuchBindingException;
 import com.google.devtools.build.lib.packages.Package.NameConflictException;
 import com.google.devtools.build.lib.packages.PackageFactory;
-import com.google.devtools.build.lib.packages.RuleFactory.InvalidRuleException;
+import com.google.devtools.build.lib.packages.RuleClass;
+import com.google.devtools.build.lib.packages.RuleFactory;
 import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.packages.Type.ConversionException;
+import com.google.devtools.build.lib.syntax.AbstractFunction;
 import com.google.devtools.build.lib.syntax.BuildFileAST;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.FuncallExpression;
@@ -38,11 +42,13 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
+import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 
 /**
  * A SkyFunction to parse WORKSPACE files.
@@ -51,9 +57,9 @@ public class WorkspaceFileFunction implements SkyFunction {
 
   private static final String BIND = "bind";
 
-  private PackageFactory packageFactory;
+  private final PackageFactory packageFactory;
 
-  public WorkspaceFileFunction(PackageFactory packageFactory) {
+  WorkspaceFileFunction(PackageFactory packageFactory) {
     this.packageFactory = packageFactory;
   }
 
@@ -75,7 +81,7 @@ public class WorkspaceFileFunction implements SkyFunction {
     try {
       inputSource = ParserInputSource.create(workspaceFilePath);
     } catch (IOException e) {
-      throw new WorkspaceFileFunctionException(skyKey, e);
+      throw new WorkspaceFileFunctionException(e, Transience.TRANSIENT);
     }
     buildFileAST = BuildFileAST.parseBuildFile(inputSource, localReporter, null, false);
     if (buildFileAST.containsErrors()) {
@@ -86,12 +92,15 @@ public class WorkspaceFileFunction implements SkyFunction {
           localReporter.handle(
               Event.error("Error evaluating WORKSPACE file " + workspaceFilePath));
         }
-      } catch (NoSuchBindingException | InvalidRuleException | NameConflictException e) {
-        localReporter.handle(Event.error(e.getMessage()));
+      } catch (EvalException e) {
+        throw new WorkspaceFileFunctionException(e);
       }
     }
 
     builder.addEvents(localReporter.getEvents());
+    if (localReporter.hasErrors()) {
+      builder.setContainsErrors();
+    }
     return new WorkspaceFileValue(holder.workspaceName, builder.build());
   }
 
@@ -112,7 +121,7 @@ public class WorkspaceFileFunction implements SkyFunction {
           throw new EvalException(ast.getLocation(), errorMessage);
         }
         holder.workspaceName = name;
-        return com.google.devtools.build.lib.syntax.Environment.NONE;
+        return NONE;
       }
     };
   }
@@ -135,18 +144,51 @@ public class WorkspaceFileFunction implements SkyFunction {
           throw new EvalException(ast.getLocation(), e.getMessage());
         }
 
-        return com.google.devtools.build.lib.syntax.Environment.NONE;
+        return NONE;
+      }
+    };
+  }
+
+  /**
+   * Returns a function-value implementing the build rule "ruleClass" (e.g. cc_library) in the
+   * specified package context.
+   */
+  private static Function newRuleFunction(final RuleFactory ruleFactory,
+      final ExternalPackageBuilder builder, final String ruleClassName) {
+    return new AbstractFunction(ruleClassName) {
+      @Override
+      public Object call(List<Object> args, Map<String, Object> kwargs, FuncallExpression ast,
+          com.google.devtools.build.lib.syntax.Environment env)
+          throws EvalException {
+        if (!args.isEmpty()) {
+          throw new EvalException(ast.getLocation(),
+              "build rules do not accept positional parameters");
+        }
+
+        try {
+          RuleClass ruleClass = ruleFactory.getRuleClass(ruleClassName);
+          builder.createAndAddRepositoryRule(ruleClass, kwargs, ast);
+        } catch (RuleFactory.InvalidRuleException | NameConflictException | SyntaxException e) {
+          throw new EvalException(ast.getLocation(), e.getMessage());
+        }
+        return NONE;
       }
     };
   }
 
   public boolean evaluateWorkspaceFile(BuildFileAST buildFileAST, WorkspaceNameHolder holder,
       ExternalPackageBuilder builder)
-          throws InterruptedException, NoSuchBindingException, InvalidRuleException,
-          NameConflictException {
+          throws InterruptedException, EvalException, WorkspaceFileFunctionException {
     // Environment is defined in SkyFunction and the syntax package.
     com.google.devtools.build.lib.syntax.Environment workspaceEnv =
         new com.google.devtools.build.lib.syntax.Environment();
+
+    RuleFactory ruleFactory = new RuleFactory(packageFactory.getRuleClassProvider());
+    for (String ruleClass : ruleFactory.getRuleClassNames()) {
+      Function ruleFunction = newRuleFunction(ruleFactory, builder, ruleClass);
+      workspaceEnv.update(ruleClass, ruleFunction);
+    }
+
     workspaceEnv.update(BIND, newBindFunction(builder));
     workspaceEnv.update("workspace", newWorkspaceNameFunction(holder));
 
@@ -154,8 +196,11 @@ public class WorkspaceFileFunction implements SkyFunction {
     if (!buildFileAST.exec(workspaceEnv, eventHandler)) {
       return false;
     }
-
-    builder.resolveBindTargets(packageFactory.getRuleClass(BIND));
+    try {
+      builder.resolveBindTargets(packageFactory.getRuleClass(BIND));
+    } catch (NoSuchBindingException e) {
+      throw new WorkspaceFileFunctionException(e);
+    }
     return true;
   }
 
@@ -164,8 +209,16 @@ public class WorkspaceFileFunction implements SkyFunction {
   }
 
   private static final class WorkspaceFileFunctionException extends SkyFunctionException {
-    public WorkspaceFileFunctionException(SkyKey key, IOException e) {
-      super(key, e);
+    public WorkspaceFileFunctionException(IOException e, Transience transience) {
+      super(e, transience);
+    }
+
+    public WorkspaceFileFunctionException(NoSuchBindingException e) {
+      super(e, Transience.PERSISTENT);
+    }
+
+    public WorkspaceFileFunctionException(EvalException e) {
+      super(e, Transience.PERSISTENT);
     }
   }
 }

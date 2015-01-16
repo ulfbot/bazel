@@ -18,10 +18,12 @@ import static com.google.devtools.build.lib.rules.objc.XcodeProductType.LIBRARY_
 
 import com.google.common.base.Optional;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
-import com.google.devtools.build.lib.view.ConfiguredTarget;
-import com.google.devtools.build.lib.view.RuleContext;
 
 /**
  * Implementation for {@code objc_import}.
@@ -31,7 +33,10 @@ public class ObjcImport implements RuleConfiguredTargetFactory {
   public ConfiguredTarget create(RuleContext ruleContext) throws InterruptedException {
     ObjcCommon common = new ObjcCommon.Builder(ruleContext)
         .setBaseAttributes(new ObjcBase.Attributes(ruleContext))
-        .setIntermediateArtifacts(ObjcBase.intermediateArtifacts(ruleContext))
+        .setIntermediateArtifacts(ObjcRuleClasses.intermediateArtifacts(ruleContext))
+        .setAlwayslink(ruleContext.attributes().get("alwayslink", Type.BOOLEAN))
+        .addExtraImportLibraries(
+            ruleContext.getPrerequisiteArtifacts("archives", Mode.TARGET).list())
         .build();
     common.reportErrors();
 
@@ -52,6 +57,7 @@ public class ObjcImport implements RuleConfiguredTargetFactory {
             .add(ruleContext.getImplicitOutputArtifact(ObjcRuleClasses.PBXPROJ))
             .build(),
         Optional.of(xcodeProvider),
-        Optional.of(common.getObjcProvider()));
+        Optional.of(common.getObjcProvider()),
+        Optional.<J2ObjcSrcsProvider>absent());
   }
 }

@@ -21,6 +21,17 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.AnalysisEnvironment;
+import com.google.devtools.build.lib.analysis.AnalysisUtils;
+import com.google.devtools.build.lib.analysis.CompilationPrerequisitesProvider;
+import com.google.devtools.build.lib.analysis.FileProvider;
+import com.google.devtools.build.lib.analysis.FilesToCompileProvider;
+import com.google.devtools.build.lib.analysis.LanguageDependentFragment;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.TempsProvider;
+import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
@@ -38,17 +49,6 @@ import com.google.devtools.build.lib.util.FileType;
 import com.google.devtools.build.lib.util.FileTypeSet;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.AnalysisEnvironment;
-import com.google.devtools.build.lib.view.AnalysisUtils;
-import com.google.devtools.build.lib.view.CompilationPrerequisitesProvider;
-import com.google.devtools.build.lib.view.FileProvider;
-import com.google.devtools.build.lib.view.FilesToCompileProvider;
-import com.google.devtools.build.lib.view.LanguageDependentFragment;
-import com.google.devtools.build.lib.view.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.view.RuleConfiguredTargetBuilder;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.TempsProvider;
-import com.google.devtools.build.lib.view.TransitiveInfoCollection;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -140,7 +140,7 @@ public final class CcCommon {
         new InstrumentedFilesCollector(ruleContext, CppRuleClasses.INSTRUMENTATION_SPEC,
             CC_METADATA_COLLECTOR);
     this.sources = hasAttribute("srcs", Type.LABEL_LIST)
-        ? ruleContext.getPrerequisiteArtifacts("srcs", Mode.TARGET)
+        ? ruleContext.getPrerequisiteArtifacts("srcs", Mode.TARGET).list()
         : ImmutableList.<Artifact>of();
 
     this.cAndCppSources = collectCAndCppSources();
@@ -304,8 +304,11 @@ public final class CcCommon {
   }
 
   private boolean shouldProcessHeaders() {
-    return ruleContext.getFeatures().contains("preprocess_headers")
-        || ruleContext.getFeatures().contains("parse_headers");
+    boolean crosstoolSupportsHeaderParsing =
+        CppHelper.getToolchain(ruleContext).supportsHeaderParsing();
+    return crosstoolSupportsHeaderParsing && (
+        ruleContext.getFeatures().contains(CppRuleClasses.PREPROCESS_HEADERS)
+        || ruleContext.getFeatures().contains(CppRuleClasses.PARSE_HEADERS));
   }
 
   private ImmutableList<Pair<Artifact, Label>> collectCAndCppSources() {
@@ -324,12 +327,17 @@ public final class CcCommon {
     }
     for (FileProvider provider : providers) {
       for (Artifact artifact : FileType.filter(provider.getFilesToBuild(), SOURCE_TYPES)) {
-        if ((CppFileTypes.CPP_HEADER.matches(artifact.getPath()) && !processHeaders)
-            || CppFileTypes.CPP_TEXTUAL_INCLUDE.matches(artifact.getPath())) {
+        boolean isHeader = CppFileTypes.CPP_HEADER.matches(artifact.getExecPath());
+        if ((isHeader && !processHeaders)
+            || CppFileTypes.CPP_TEXTUAL_INCLUDE.matches(artifact.getExecPath())) {
           continue;
         }
         Label oldLabel = map.put(artifact, provider.getLabel());
-        if (oldLabel != null && !oldLabel.equals(provider.getLabel())) {
+        // TODO(bazel-team): We currently do not warn for duplicate headers with
+        // different labels, as that would require cleaning up the code base
+        // without significant benefit; we should eventually make this
+        // consistent one way or the other.
+        if (!isHeader && oldLabel != null && !oldLabel.equals(provider.getLabel())) {
           ruleContext.attributeError("srcs", String.format(
               "Artifact '%s' is duplicated (through '%s' and '%s')",
               artifact.getExecPathString(), oldLabel, provider.getLabel()));
@@ -620,7 +628,7 @@ public final class CcCommon {
         ShellUtils.tokenize(tokens, ruleContext.expandMakeVariables(DEFINES_ATTRIBUTE, define));
         if (tokens.size() == 1) {
           defines.add(tokens.get(0));
-        } else if (tokens.size() == 0) {
+        } else if (tokens.isEmpty()) {
           ruleContext.attributeError(DEFINES_ATTRIBUTE, "empty definition not allowed");
         } else {
           ruleContext.attributeError(DEFINES_ATTRIBUTE,
@@ -781,7 +789,8 @@ public final class CcCommon {
         .setNoCopts(getNoCopts(ruleContext))
         .addAdditionalIncludes(additionalIncludes)
         .addPluginTargets(activePlugins)
-        .setEnableModules(ruleContext.getFeatures().contains(CppRuleClasses.LAYERING_CHECK))
+        .setEnableLayeringCheck(ruleContext.getFeatures().contains(CppRuleClasses.LAYERING_CHECK))
+        .setCompileHeaderModules(ruleContext.getFeatures().contains(CppRuleClasses.HEADER_MODULES))
         .createCcCompileActions();
   }
 
@@ -822,7 +831,7 @@ public final class CcCommon {
    * Returns any linker scripts found in the dependencies of the rule.
    */
   Iterable<Artifact> getLinkerScripts() {
-    return FileType.filter(ruleContext.getPrerequisiteArtifacts("deps", Mode.TARGET),
+    return FileType.filter(ruleContext.getPrerequisiteArtifacts("deps", Mode.TARGET).list(),
         CppFileTypes.LINKER_SCRIPT);
   }
 
@@ -868,14 +877,14 @@ public final class CcCommon {
     if (context.getCppModuleMap() != null) {
       // Header files from 'srcs' attribute are the private headers
       Iterable<Artifact> srcs = (ruleContext.attributes().getAttributeDefinition("srcs") != null)
-          ? ruleContext.getPrerequisiteArtifacts("srcs", Mode.TARGET)
+          ? ruleContext.getPrerequisiteArtifacts("srcs", Mode.TARGET).list()
           : ImmutableList.<Artifact>of();
       Iterable<Artifact> privateHeaders = Iterables.filter(srcs, HEADER_FILTER);
 
       // Exposed header files from 'hdrs' attribute are the public headers
       ImmutableList<Artifact> publicHeaders =
           (ruleContext.attributes().getAttributeDefinition("hdrs") != null)
-              ? ruleContext.getPrerequisiteArtifacts("hdrs", Mode.TARGET)
+              ? ruleContext.getPrerequisiteArtifacts("hdrs", Mode.TARGET).list()
               : ImmutableList.<Artifact>of();
 
       // Enumerate list of dependencies
@@ -910,11 +919,13 @@ public final class CcCommon {
       Iterable<CppModuleMap> depsLabels =
           Iterables.filter(depsBuilder.build(), Predicates.<CppModuleMap>notNull());
 
+      ImmutableList<PathFragment> bootstrapHackHeaders = ImmutableList.of();
       CppModuleMapAction action = new CppModuleMapAction(
           ruleContext.getActionOwner(), context.getCppModuleMap(),
-          privateHeaders, publicHeaders, depsLabels);
+          privateHeaders, publicHeaders, depsLabels, bootstrapHackHeaders,
+          ruleContext.getFeatures().contains(CppRuleClasses.HEADER_MODULES));
 
-      ruleContext.getAnalysisEnvironment().registerAction(action);
+      ruleContext.registerAction(action);
     }
   }
 
@@ -935,26 +946,28 @@ public final class CcCommon {
       CcLinkingOutputs linkingOutputs,
       DwoArtifactsCollector dwoArtifacts,
       TransitiveLipoInfoProvider transitiveLipoInfo) {
-     Iterable<Artifact> objectFiles = ccCompilationOutputs.getObjectFiles(
-         CppHelper.usePic(ruleContext, false));
-     builder
-         .setFilesToBuild(filesToBuild)
-         .add(CppCompilationContext.class, cppCompilationContext)
-         .add(TransitiveLipoInfoProvider.class, transitiveLipoInfo)
-         .add(CcExecutionDynamicLibrariesProvider.class,
-             new CcExecutionDynamicLibrariesProvider(collectExecutionDynamicLibraryArtifacts(
-                     ruleContext, linkingOutputs.getExecutionDynamicLibraries())))
-         .add(CcNativeLibraryProvider.class, new CcNativeLibraryProvider(
-             collectTransitiveCcNativeLibraries(ruleContext, linkingOutputs.getDynamicLibraries())))
-         .add(InstrumentedFilesProvider.class, new InstrumentedFilesProviderImpl(
-             getInstrumentedFiles(objectFiles), getInstrumentationMetadataFiles(objectFiles)))
-         .add(FilesToCompileProvider.class, new FilesToCompileProvider(
-             getFilesToCompile(ccCompilationOutputs)))
-         .add(CompilationPrerequisitesProvider.class,
-             collectCompilationPrerequisites(ruleContext, cppCompilationContext))
-         .add(TempsProvider.class, new TempsProvider(getTemps(ccCompilationOutputs)))
-         .add(CppDebugFileProvider.class, new CppDebugFileProvider(
-             dwoArtifacts.getDwoArtifacts(),
-             dwoArtifacts.getPicDwoArtifacts()));
+    List<Artifact> instrumentedObjectFiles = new ArrayList<>();
+    instrumentedObjectFiles.addAll(ccCompilationOutputs.getObjectFiles(false));
+    instrumentedObjectFiles.addAll(ccCompilationOutputs.getObjectFiles(true));
+    builder
+        .setFilesToBuild(filesToBuild)
+        .add(CppCompilationContext.class, cppCompilationContext)
+        .add(TransitiveLipoInfoProvider.class, transitiveLipoInfo)
+        .add(CcExecutionDynamicLibrariesProvider.class,
+            new CcExecutionDynamicLibrariesProvider(collectExecutionDynamicLibraryArtifacts(
+                ruleContext, linkingOutputs.getExecutionDynamicLibraries())))
+        .add(CcNativeLibraryProvider.class, new CcNativeLibraryProvider(
+            collectTransitiveCcNativeLibraries(ruleContext, linkingOutputs.getDynamicLibraries())))
+        .add(InstrumentedFilesProvider.class, new InstrumentedFilesProviderImpl(
+            getInstrumentedFiles(instrumentedObjectFiles),
+            getInstrumentationMetadataFiles(instrumentedObjectFiles)))
+        .add(FilesToCompileProvider.class, new FilesToCompileProvider(
+            getFilesToCompile(ccCompilationOutputs)))
+        .add(CompilationPrerequisitesProvider.class,
+            collectCompilationPrerequisites(ruleContext, cppCompilationContext))
+        .add(TempsProvider.class, new TempsProvider(getTemps(ccCompilationOutputs)))
+        .add(CppDebugFileProvider.class, new CppDebugFileProvider(
+            dwoArtifacts.getDwoArtifacts(),
+            dwoArtifacts.getPicDwoArtifacts()));
   }
 }

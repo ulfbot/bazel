@@ -21,16 +21,16 @@ import static com.google.devtools.build.lib.packages.Type.LABEL_LIST;
 import static com.google.devtools.build.lib.packages.Type.LICENSE;
 import static com.google.devtools.build.lib.packages.Type.STRING;
 
+import com.google.devtools.build.lib.analysis.BaseRuleClasses;
+import com.google.devtools.build.lib.analysis.BlazeRule;
+import com.google.devtools.build.lib.analysis.RuleDefinition;
+import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.packages.Attribute.LateBoundLabel;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.syntax.Label;
-import com.google.devtools.build.lib.view.BaseRuleClasses;
-import com.google.devtools.build.lib.view.BlazeRule;
-import com.google.devtools.build.lib.view.RuleDefinition;
-import com.google.devtools.build.lib.view.RuleDefinitionEnvironment;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
 
 /**
  * Rule definition for compiler definition.
@@ -63,6 +63,7 @@ public final class CcToolchainRule implements RuleDefinition {
         .add(attr("dynamic_runtime_libs", LABEL_LIST).legacyAllowAnyFileType().mandatory())
         .add(attr("module_map", LABEL).legacyAllowAnyFileType().cfg(HOST))
         .add(attr("supports_param_files", BOOLEAN).value(true))
+        .add(attr("supports_header_parsing", BOOLEAN).value(false))
         // TODO(bazel-team): Should be using the TARGET configuration.
         .add(attr(":libc_link", LABEL).cfg(HOST).value(LIBC_LINK))
         .build();

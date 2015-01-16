@@ -16,6 +16,8 @@ package com.google.devtools.build.skyframe;
 
 import com.google.common.base.Preconditions;
 
+import javax.annotation.Nullable;
+
 /**
  * Base class of exceptions thrown by {@link SkyFunction#compute} on failure.
  *
@@ -25,34 +27,59 @@ import com.google.common.base.Preconditions;
  * {@link SkyFunction#compute} to throw {@code C}. This way the type system checks that no
  * unexpected exceptions are thrown by the {@link SkyFunction}.
  *
- * We took this approach over using a generic exception class since Java disallows it because of
+ * <p>We took this approach over using a generic exception class since Java disallows it because of
  * type erasure
  * (see http://docs.oracle.com/javase/tutorial/java/generics/restrictions.html#cannotCatch).
+ *
+ * <p> Note that there are restrictions on what Exception types are allowed to be wrapped in this
+ * manner. See {@link SkyFunctionException#validateExceptionType}.
+ *
+ * <p>Failures are explicitly either transient or persistent. The transience of the failure from
+ * {@link SkyFunction#compute} should be influenced only by the computations done, and not by the
+ * transience of the failures from computations requested via
+ * {@link SkyFunction.Environment#getValueOrThrow}.
  */
 public abstract class SkyFunctionException extends Exception {
+
+  /** The transience of the error. */
+  public enum Transience {
+    // An error that may or may not occur again if the computation were re-run. If a computation
+    // results in a transient error and is needed on a subsequent MemoizingEvaluator#evaluate call,
+    // it will be re-executed.
+    TRANSIENT,
+
+    // An error that is completely deterministic and persistent in terms of the computation's
+    // inputs. Persistent errors may be cached.
+    PERSISTENT;
+  }
+
+  private final Transience transience;
+  @Nullable
   private final SkyKey rootCause;
-  private final boolean isTransient;
 
-  public SkyFunctionException(SkyKey rootCause, Throwable cause) {
-    super(Preconditions.checkNotNull(cause));
-    // TODO(bazel-team): Consider getting rid of custom root causes since they can't be trusted.
-    this.rootCause = Preconditions.checkNotNull(rootCause, cause);
-    // TODO(bazel-team): We may want to switch the default to false at some point.
-    this.isTransient = true;
+  public SkyFunctionException(Exception cause, Transience transience) {
+    this(cause, transience, null);
+  }
+  
+  /** Used to rethrow a child error that the parent cannot handle. */
+  public SkyFunctionException(Exception cause, SkyKey childKey) {
+    this(cause, Transience.PERSISTENT, childKey);
   }
 
-  public SkyFunctionException(SkyKey rootCause, Throwable cause, boolean isTransient) {
+  private SkyFunctionException(Exception cause, Transience transience, SkyKey rootCause) {
     super(Preconditions.checkNotNull(cause));
-    this.rootCause = Preconditions.checkNotNull(rootCause, cause);
-    this.isTransient = isTransient;
+    SkyFunctionException.validateExceptionType(cause.getClass());
+    this.transience = transience;
+    this.rootCause = rootCause;
   }
 
+  @Nullable
   final SkyKey getRootCauseSkyKey() {
     return rootCause;
   }
 
   final boolean isTransient() {
-    return isTransient;
+    return transience == Transience.TRANSIENT;
   }
 
   /**
@@ -60,5 +87,47 @@ public abstract class SkyFunctionException extends Exception {
    */
   public boolean isCatastrophic() {
     return false;
+  }
+
+  @Override
+  public Exception getCause() {
+    return (Exception) super.getCause();
+  }
+
+  static <E extends Throwable> void validateExceptionType(Class<E> exceptionClass) {
+    if (exceptionClass.equals(ValueOrExceptionUtils.BottomException.class)) {
+      return;
+    }
+
+    if (exceptionClass.isAssignableFrom(RuntimeException.class)) {
+      throw new IllegalStateException(exceptionClass.getSimpleName() + " is a supertype of "
+          + "RuntimeException. Don't do this since then you would potentially swallow all "
+          + "RuntimeExceptions, even those from Skyframe");
+    }
+    if (RuntimeException.class.isAssignableFrom(exceptionClass)) {
+      throw new IllegalStateException(exceptionClass.getSimpleName() + " is a subtype of "
+          + "RuntimeException. You should rewrite your code to use checked exceptions.");
+    }
+    if (InterruptedException.class.isAssignableFrom(exceptionClass)) {
+      throw new IllegalStateException(exceptionClass.getSimpleName() + " is a subtype of "
+          + "InterruptedException. Don't do this; Skyframe handles interrupts separately from the "
+          + "general SkyFunctionException mechanism.");
+    }
+  }
+
+  /** A {@link SkyFunctionException} with a definite root cause. */
+  static class ReifiedSkyFunctionException extends SkyFunctionException {
+    private final boolean isCatastrophic;
+
+    ReifiedSkyFunctionException(SkyFunctionException e, SkyKey key) {
+      super(e.getCause(), e.transience, Preconditions.checkNotNull(e.getRootCauseSkyKey() == null
+          ? key : e.getRootCauseSkyKey()));
+      this.isCatastrophic = e.isCatastrophic();
+    }
+
+    @Override
+    public boolean isCatastrophic() {
+      return isCatastrophic;
+    }
   }
 }

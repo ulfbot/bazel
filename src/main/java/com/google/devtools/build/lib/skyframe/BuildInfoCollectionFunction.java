@@ -17,12 +17,12 @@ import com.google.common.base.Supplier;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactFactory;
 import com.google.devtools.build.lib.actions.Root;
+import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoFactory;
+import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoFactory.BuildInfoContext;
+import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoFactory.BuildInfoKey;
+import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoFactory.BuildInfoType;
 import com.google.devtools.build.lib.skyframe.BuildInfoCollectionValue.BuildInfoKeyAndConfig;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.buildinfo.BuildInfoFactory;
-import com.google.devtools.build.lib.view.buildinfo.BuildInfoFactory.BuildInfoContext;
-import com.google.devtools.build.lib.view.buildinfo.BuildInfoFactory.BuildInfoKey;
-import com.google.devtools.build.lib.view.buildinfo.BuildInfoFactory.BuildInfoType;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
@@ -63,8 +63,9 @@ public class BuildInfoCollectionFunction implements SkyFunction {
       @Override
       public Artifact getBuildInfoArtifact(PathFragment rootRelativePath, Root root,
           BuildInfoType type) {
-        return factory.getSpecialMetadataHandlingArtifact(rootRelativePath, root,
-            keyAndConfig, type == BuildInfoType.NO_REBUILD, type != BuildInfoType.NO_REBUILD);
+        return type == BuildInfoType.NO_REBUILD
+            ? factory.getConstantMetadataArtifact(rootRelativePath, root, keyAndConfig)
+            : factory.getDerivedArtifact(rootRelativePath, root, keyAndConfig);
       }
 
       @Override

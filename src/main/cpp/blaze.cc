@@ -251,7 +251,13 @@ static vector<string> GetArgumentArray() {
 
   // Add JVM arguments particular to building blaze64 and particular JVM
   // versions.
-  globals->options.AddJVMArguments(globals->options.GetHostJavabase(), &result);
+  string error;
+  blaze_exit_code::ExitCode jvm_args_exit_code =
+      globals->options.AddJVMArguments(globals->options.GetHostJavabase(),
+                                       &result, &error);
+  if (jvm_args_exit_code != blaze_exit_code::SUCCESS) {
+    die(jvm_args_exit_code, "%s", error.c_str());
+  }
 
   // We put all directories on the java.library.path that contain .so files.
   string java_library_path = "-Djava.library.path=";
@@ -301,9 +307,6 @@ static vector<string> GetArgumentArray() {
   if (!globals->options.skyframe.empty()) {
     result.push_back("--skyframe=" + globals->options.skyframe);
   }
-  if (!globals->options.skygraph.empty()) {
-    result.push_back("--skygraph=" + globals->options.skygraph);
-  }
   if (globals->options.allow_configurable_attributes) {
     result.push_back("--allow_configurable_attributes");
   }
@@ -314,6 +317,10 @@ static vector<string> GetArgumentArray() {
     result.push_back("--fatal_event_bus_exceptions");
   } else {
     result.push_back("--nofatal_event_bus_exceptions");
+  }
+  if (globals->options.webstatus_port) {
+    result.push_back("--use_webstatusserver=" + \
+                     std::to_string(globals->options.webstatus_port));
   }
 
   // This is only for Blaze reporting purposes; the real interpretation of the
@@ -1232,9 +1239,13 @@ static void SendServerRequest(void) {
 // Parse the options, storing parsed values in globals.
 // Returns the index of the first non-option argument.
 static void ParseOptions(int argc, const char *argv[]) {
-  globals->option_processor.ParseOptions(argc, argv,
-                                        globals->workspace,
-                                        globals->cwd);
+  string error;
+  blaze_exit_code::ExitCode parse_exit_code =
+      globals->option_processor.ParseOptions(argc, argv, globals->workspace,
+                                             globals->cwd, &error);
+  if (parse_exit_code != blaze_exit_code::SUCCESS) {
+    die(parse_exit_code, "%s", error.c_str());
+  }
   globals->options = globals->option_processor.GetParsedStartupOptions();
 }
 
@@ -1476,13 +1487,19 @@ static void WarnIfFullDisk() {
     return;
   }
 
-  if (10LL * buf.f_bavail * buf.f_bsize < buf.f_frsize * buf.f_blocks ||
-      10LL * buf.f_favail < buf.f_files) {
-    fprintf(stderr, "WARNING: build volume %s is nearly full "
-            "(%llu inodes, %.1fGB remain).\n",
+  if (10LL * buf.f_favail < buf.f_files) {
+    fprintf(stderr,
+            "WARNING: build volume %s is nearly full "
+            "(%llu inodes remain).\n",
             GetMountpoint(globals->options.output_base).c_str(),
-            static_cast<int64>(buf.f_favail),
-            (1.0 * buf.f_bavail) * buf.f_bsize / 1E9);
+            static_cast<int64>(buf.f_favail));
+  }
+  if (10LL * buf.f_bavail < buf.f_blocks) {
+    fprintf(stderr,
+            "WARNING: build volume %s is nearly full "
+            "(%.1fGB remain).\n",
+            GetMountpoint(globals->options.output_base).c_str(),
+            (1.0 * buf.f_bavail) * buf.f_frsize / 1E9);
   }
 }
 
@@ -1497,30 +1514,6 @@ void SetupStreams() {
   if (fcntl(0, F_GETFL) == -1) open("/dev/null", O_RDONLY);
   if (fcntl(1, F_GETFL) == -1) open("/dev/null", O_WRONLY);
   if (fcntl(2, F_GETFL) == -1) open("/dev/null", O_WRONLY);
-}
-
-// Checks whether the --blaze_cpu option is given and re-executes blaze/blaze64
-// if necessary.
-static void CheckForBlaze64(int argc, const char *argv[]) {
-  string binary = argv[0];
-
-  bool use_blaze64 = globals->options.use_blaze64;
-  if (!use_blaze64 && blaze_util::ends_with(binary, "blaze64")) {
-    binary.erase(binary.length() - 2);
-  } else if (!use_blaze64 && blaze_util::ends_with(binary, "blaze64.rc")) {
-    binary.erase(binary.length() - 5, 2);
-  } else if (use_blaze64 && blaze_util::ends_with(binary, "blaze")) {
-    binary.append("64");
-  } else if (use_blaze64 && blaze_util::ends_with(binary, "blaze.rc")) {
-    binary.insert(binary.length() - 3, "64");
-  } else {
-    // We are already running the correct binary.
-    return;
-  }
-
-  ReExecute(binary, argc, argv);
-  fprintf(stderr, "WARNING: Could not execute '%s'. Continuing anyway\n",
-          binary.c_str());
 }
 
 // Set an 8MB stack for Blaze. When the stack max is unbounded, it changes the
@@ -1567,37 +1560,41 @@ static void CreateSecureOutputRoot() {
   const char* root = globals->options.output_user_root.c_str();
   struct stat fileinfo = {};
 
+  if (mkdir(root, 0755) == 0) {
+    return;  // mkdir succeeded, no need to verify ownership/mode.
+  }
+  if (errno != EEXIST) {
+    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "mkdir('%s')", root);
+  }
+
+  // The path already exists.
+  // Check ownership and mode, and verify that it is a directory.
+
   if (lstat(root, &fileinfo) < 0) {
-    if (errno != ENOENT) {
-      pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "lstat('%s')", root);
-    }
+    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "lstat('%s')", root);
+  }
 
-    if (mkdir(root, 0755) < 0) {
-      pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "mkdir('%s')", root);
-    }
-  } else {
-    if (fileinfo.st_uid != geteuid()) {
-      die(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "'%s' is not owned by me",
-          root);
-    }
+  if (fileinfo.st_uid != geteuid()) {
+    die(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "'%s' is not owned by me",
+        root);
+  }
 
-    if ((fileinfo.st_mode & 022) != 0) {
-      int new_mode = fileinfo.st_mode & (~022);
-      if (chmod(root, new_mode) < 0) {
-        die(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR,
-            "'%s' has mode %o, chmod to %o failed", root,
-            fileinfo.st_mode & 07777, new_mode);
-      }
+  if ((fileinfo.st_mode & 022) != 0) {
+    int new_mode = fileinfo.st_mode & (~022);
+    if (chmod(root, new_mode) < 0) {
+      die(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR,
+          "'%s' has mode %o, chmod to %o failed", root,
+          fileinfo.st_mode & 07777, new_mode);
     }
+  }
 
-    if (stat(root, &fileinfo) < 0) {
-      pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "stat('%s')", root);
-    }
+  if (stat(root, &fileinfo) < 0) {
+    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "stat('%s')", root);
+  }
 
-    if (!S_ISDIR(fileinfo.st_mode)) {
-      die(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "'%s' is not a directory",
-          root);
-    }
+  if (!S_ISDIR(fileinfo.st_mode)) {
+    die(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "'%s' is not a directory",
+        root);
   }
 }
 
@@ -1613,8 +1610,12 @@ int main(int argc, const char *argv[]) {
   ComputeWorkspace();
   CheckBinaryPath(argv[0]);
   ParseOptions(argc, argv);
-  globals->options.CheckForReExecuteOptions(argc, argv);
-  CheckForBlaze64(argc, argv);
+  string error;
+  blaze_exit_code::ExitCode reexec_options_exit_code =
+      globals->options.CheckForReExecuteOptions(argc, argv, &error);
+  if (reexec_options_exit_code != blaze_exit_code::SUCCESS) {
+    die(reexec_options_exit_code, "%s", error.c_str());
+  }
   CheckEnvironment();
   CreateSecureOutputRoot();
 

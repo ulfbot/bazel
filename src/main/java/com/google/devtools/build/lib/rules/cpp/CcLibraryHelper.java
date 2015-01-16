@@ -20,6 +20,19 @@ import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.AnalysisUtils;
+import com.google.devtools.build.lib.analysis.CompilationPrerequisitesProvider;
+import com.google.devtools.build.lib.analysis.FileProvider;
+import com.google.devtools.build.lib.analysis.FilesToCompileProvider;
+import com.google.devtools.build.lib.analysis.LanguageDependentFragment;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.Runfiles;
+import com.google.devtools.build.lib.analysis.RunfilesProvider;
+import com.google.devtools.build.lib.analysis.TempsProvider;
+import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
@@ -30,19 +43,6 @@ import com.google.devtools.build.lib.rules.cpp.LinkerInputs.LibraryToLink;
 import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.AnalysisUtils;
-import com.google.devtools.build.lib.view.CompilationPrerequisitesProvider;
-import com.google.devtools.build.lib.view.FileProvider;
-import com.google.devtools.build.lib.view.FilesToCompileProvider;
-import com.google.devtools.build.lib.view.LanguageDependentFragment;
-import com.google.devtools.build.lib.view.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.Runfiles;
-import com.google.devtools.build.lib.view.RunfilesProvider;
-import com.google.devtools.build.lib.view.TempsProvider;
-import com.google.devtools.build.lib.view.TransitiveInfoCollection;
-import com.google.devtools.build.lib.view.TransitiveInfoProvider;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -146,6 +146,7 @@ public final class CcLibraryHelper {
 
   private final List<Artifact> publicHeaders = new ArrayList<>();
   private final List<Artifact> privateHeaders = new ArrayList<>();
+  private final List<PathFragment> additionalExportedHeaders = new ArrayList<>();
   private final List<Pair<Artifact, Label>> sources = new ArrayList<>();
   private final List<Artifact> objectFiles = new ArrayList<>();
   private final List<Artifact> picObjectFiles = new ArrayList<>();
@@ -172,6 +173,7 @@ public final class CcLibraryHelper {
 
   private boolean emitCppModuleMaps = true;
   private boolean enableLayeringCheck;
+  private boolean compileHeaderModules;
   private boolean emitCompileActionsIfEmpty = true;
   private boolean emitCcNativeLibrariesProvider;
   private boolean emitCcSpecificLinkParamsProvider;
@@ -210,6 +212,16 @@ public final class CcLibraryHelper {
    */
   public CcLibraryHelper addPrivateHeaders(Iterable<Artifact> privateHeaders) {
     Iterables.addAll(this.privateHeaders, privateHeaders);
+    return this;
+  }
+
+  /**
+   * Add the corresponding files as public header files, i.e., these files will not be compiled, but
+   * are made visible as includes to dependent rules in module maps.
+   */
+  public CcLibraryHelper addAdditionalExportedHeaders(
+      Iterable<PathFragment> additionalExportedHeaders) {
+    Iterables.addAll(this.additionalExportedHeaders, additionalExportedHeaders);
     return this;
   }
 
@@ -510,6 +522,17 @@ public final class CcLibraryHelper {
   }
 
   /**
+   * This enabled or disables compilation of C++ header modules.
+   * TODO(bazel-team): Add a cc_toolchain flag that allows fully disabling this feature and document
+   * this feature.
+   * See http://clang.llvm.org/docs/Modules.html.
+   */
+  public CcLibraryHelper setCompileHeaderModules(boolean compileHeaderModules) {
+    this.compileHeaderModules = compileHeaderModules;
+    return this;
+  }
+
+  /**
    * Enables or disables generation of compile actions if there are no sources. Some rules declare a
    * .a or .so implicit output, which requires that these files are created even if there are no
    * source files, so be careful when calling this.
@@ -558,7 +581,7 @@ public final class CcLibraryHelper {
     this.emitCompileProviders = true;
     return this;
   }
-  
+
   /**
    * Sets whether to emit the transitive module map references of a public library headers target.
    */
@@ -586,27 +609,31 @@ public final class CcLibraryHelper {
       }
     }
 
-    CppCompilationContext cppCompilationContext = initializeCppCompilationContext();
     CcLinkingOutputs ccLinkingOutputs = CcLinkingOutputs.EMPTY;
     CcCompilationOutputs ccOutputs = new CcCompilationOutputs.Builder().build();
-    if (emitCompileActionsIfEmpty || !sources.isEmpty()) {
-      CppModel model = new CppModel(ruleContext, semantics)
-          .addSources(sources)
-          .addCopts(copts)
-          .addPlugins(plugins)
-          .setContext(cppCompilationContext)
-          .setLinkTargetType(linkType)
-          .setNeverLink(neverlink)
-          .setFake(fake)
-          .setAllowInterfaceSharedObjects(emitInterfaceSharedObjects)
-          .setCreateDynamicLibrary(emitDynamicLibrary)
-          // Note: this doesn't actually save the temps, it just makes the CppModel use the
-          // configurations --save_temps setting to decide whether to actually save the temps.
-          .setSaveTemps(true)
-          .setEnableModules(enableLayeringCheck)
-          .setNoCopts(nocopts)
-          .setDynamicLibraryPath(dynamicLibraryPath)
-          .addLinkopts(linkopts);
+    CppModel model = new CppModel(ruleContext, semantics)
+        .addSources(sources)
+        .addCopts(copts)
+        .addPlugins(plugins)
+        .setLinkTargetType(linkType)
+        .setNeverLink(neverlink)
+        .setFake(fake)
+        .setAllowInterfaceSharedObjects(emitInterfaceSharedObjects)
+        .setCreateDynamicLibrary(emitDynamicLibrary)
+        // Note: this doesn't actually save the temps, it just makes the CppModel use the
+        // configurations --save_temps setting to decide whether to actually save the temps.
+        .setSaveTemps(true)
+        .setEnableLayeringCheck(enableLayeringCheck)
+        .setCompileHeaderModules(compileHeaderModules)
+        .setNoCopts(nocopts)
+        .setDynamicLibraryPath(dynamicLibraryPath)
+        .addLinkopts(linkopts);
+    CppCompilationContext cppCompilationContext = initializeCppCompilationContext(model);
+    model.setContext(cppCompilationContext);
+    if (emitCompileActionsIfEmpty || !sources.isEmpty() || compileHeaderModules) {
+      Preconditions.checkState(
+          !compileHeaderModules || cppCompilationContext.getCppModuleMap() != null,
+          "All cc rules must support module maps.");
       ccOutputs = model.createCcCompileActions();
       if (!objectFiles.isEmpty() || !picObjectFiles.isEmpty()) {
         // Merge the pre-compiled object files into the compiler outputs.
@@ -634,12 +661,7 @@ public final class CcLibraryHelper {
           .build();
     }
 
-    DwoArtifactsCollector dwoArtifacts = DwoArtifactsCollector.transitiveCollector(
-        ccOutputs,
-        ImmutableList.<TransitiveInfoCollection>builder()
-            .addAll(deps)
-            .build());
-
+    DwoArtifactsCollector dwoArtifacts = DwoArtifactsCollector.transitiveCollector(ccOutputs, deps);
     Runfiles cppStaticRunfiles = collectCppRunfiles(ccLinkingOutputs, true);
     Runfiles cppSharedRunfiles = collectCppRunfiles(ccLinkingOutputs, false);
 
@@ -685,7 +707,7 @@ public final class CcLibraryHelper {
   /**
    * Create context for cc compile action from generated inputs.
    */
-  private CppCompilationContext initializeCppCompilationContext() {
+  private CppCompilationContext initializeCppCompilationContext(CppModel model) {
     CppCompilationContext.Builder contextBuilder =
         new CppCompilationContext.Builder(ruleContext);
 
@@ -743,8 +765,19 @@ public final class CcLibraryHelper {
       // actually be enabled, so we need to double-check here. Who would write code like this?
       if (cppModuleMap != null) {
         CppModuleMapAction action = new CppModuleMapAction(ruleContext.getActionOwner(),
-            cppModuleMap, privateHeaders, publicHeaders, collectModuleMaps());
-        ruleContext.getAnalysisEnvironment().registerAction(action);
+            cppModuleMap,
+            privateHeaders,
+            publicHeaders,
+            collectModuleMaps(),
+            additionalExportedHeaders,
+            compileHeaderModules);
+        ruleContext.registerAction(action);
+      }
+      if (model.getGeneratesPicHeaderModule()) {
+        contextBuilder.setPicHeaderModule(model.getPicHeaderModule(cppModuleMap.getArtifact()));
+      }
+      if (model.getGeratesNoPicHeaderModule()) {
+        contextBuilder.setHeaderModule(model.getHeaderModule(cppModuleMap.getArtifact()));
       }
     }
 
@@ -766,14 +799,14 @@ public final class CcLibraryHelper {
     if (toolchain != null) {
       result.add(toolchain.getCppCompilationContext().getCppModuleMap());
     }
-    
+
     if (emitHeaderTargetModuleMaps) {
       for (HeaderTargetModuleMapProvider provider : AnalysisUtils.getProviders(
           deps, HeaderTargetModuleMapProvider.class)) {
-        Iterables.addAll(result, provider.getCppModuleMaps());
+        result.addAll(provider.getCppModuleMaps());
       }
     }
-    
+
     return Iterables.filter(result, Predicates.<CppModuleMap>notNull());
   }
 

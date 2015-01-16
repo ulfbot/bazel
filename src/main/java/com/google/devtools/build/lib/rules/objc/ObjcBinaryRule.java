@@ -20,8 +20,14 @@ import static com.google.devtools.build.lib.packages.ImplicitOutputsFunction.fro
 import static com.google.devtools.build.lib.packages.ImplicitOutputsFunction.fromTemplates;
 import static com.google.devtools.build.lib.packages.Type.LABEL;
 import static com.google.devtools.build.lib.packages.Type.STRING;
+import static com.google.devtools.build.lib.packages.Type.STRING_LIST;
 
 import com.google.common.base.Optional;
+import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.analysis.BlazeRule;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.RuleDefinition;
+import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction.SafeImplicitOutputsFunction;
@@ -29,10 +35,7 @@ import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.util.FileType;
-import com.google.devtools.build.lib.view.BlazeRule;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.RuleDefinition;
-import com.google.devtools.build.lib.view.RuleDefinitionEnvironment;
+import com.google.devtools.build.xcode.common.TargetDeviceFamily;
 
 /**
  * Rule definition for objc_binary.
@@ -45,13 +48,9 @@ import com.google.devtools.build.lib.view.RuleDefinitionEnvironment;
     ancestors = { ObjcBundleLibraryRule.class })
 public class ObjcBinaryRule implements RuleDefinition {
   public static final SafeImplicitOutputsFunction IPA = fromTemplates("%{name}.ipa");
-  public static final SafeImplicitOutputsFunction DSYM_PLIST =
-      fromTemplates("%{name}.app.dSYM/Contents/Info.plist");
-  public static final SafeImplicitOutputsFunction DSYM_SYMBOL =
-      fromTemplates("%{name}.app.dSYM/Contents/Resources/DWARF/%{name}");
 
   static final String PROVISIONING_PROFILE_ATTR = "provisioning_profile";
-  
+
   private static Optional<String> stringAttribute(RuleContext context, String attribute) {
     String value = context.attributes().get(attribute, Type.STRING);
     return value.isEmpty() ? Optional.<String>absent() : Optional.of(value);
@@ -80,14 +79,8 @@ public class ObjcBinaryRule implements RuleDefinition {
         <ul>
          <li><code><var>name</var>.ipa</code>: the application bundle as an <code>.ipa</code>
              file</li>
-         <li><code><var>name</var>.xcodeproj/project.pbxproj: An Xcode project file which can be
-             used to develop or build on a Mac.</li>
-         <li><code><var>name</var>.app.dSYM/Contents/Info.plist</code>: The plist file in the
-             unzipped dSYM bundle of the application binary
-              (only built if Blaze flag "--objc_generate_debug_symbols" is specified).</li>
-         <li><code><var>name</var>.app.dSYM/Contents/Resources/DWARF/<var>name</var></code>:
-             The debug symbol file in the unzipped dSYM bundle of the application binary
-              (only built if Blaze flag "--objc_generate_debug_symbols" is specified).</li>
+         <li><code><var>name</var>.xcodeproj/project.pbxproj</code>: An Xcode project file which
+             can be used to develop or build on a Mac.</li>
         </ul>
         <!-- #END_BLAZE_RULE.IMPLICIT_OUTPUTS -->*/
         .setImplicitOutputsFunction(fromFunctions(IPA, ObjcRuleClasses.PBXPROJ))
@@ -130,6 +123,14 @@ public class ObjcBinaryRule implements RuleDefinition {
                 return "example." + rule.getName();
               }
             }))
+        /* <!-- #BLAZE_RULE(objc_binary).ATTRIBUTE(families) -->
+        The device families to which this binary is targeted. This is known as
+        the <code>TARGETED_DEVICE_FAMILY</code> build setting in Xcode project
+        files. It is a list of one or more of the strings <code>"iphone"</code>
+        and <code>"ipad"</code>.
+        <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+        .add(attr("families", STRING_LIST)
+            .value(ImmutableList.of(TargetDeviceFamily.IPHONE.getNameInRule())))
         /* <!-- #BLAZE_RULE(objc_binary).ATTRIBUTE(provisioning_profile) -->
         The provisioning profile (.mobileprovision file) to use when bundling
         the application.
@@ -144,6 +145,8 @@ public class ObjcBinaryRule implements RuleDefinition {
         // less painful and error-prone way.
         .add(attr("$bundlemerge", LABEL).cfg(HOST).exec()
             .value(env.getLabel("//tools/objc:bundlemerge")))
+        .add(attr("$dumpsyms", LABEL).cfg(HOST).exec()
+            .value(env.getLabel("//tools/objc:dump_syms")))
         .build();
   }
 }
@@ -153,6 +156,8 @@ public class ObjcBinaryRule implements RuleDefinition {
 ${ATTRIBUTE_SIGNATURE}
 
 <p>This rule produces an application bundle by linking one or more Objective-C libraries.</p>
+
+${IMPLICIT_OUTPUTS}
 
 ${ATTRIBUTE_DEFINITION}
 

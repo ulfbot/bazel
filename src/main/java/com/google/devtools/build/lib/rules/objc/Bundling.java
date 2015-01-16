@@ -18,8 +18,8 @@ import static com.google.devtools.build.lib.rules.objc.ObjcProvider.ASSET_CATALO
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.BUNDLE_FILE;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.IMPORTED_LIBRARY;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.LIBRARY;
+import static com.google.devtools.build.lib.rules.objc.ObjcProvider.MERGE_ZIP;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.NESTED_BUNDLE;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.STORYBOARD_OUTPUT_ZIP;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.XCDATAMODEL;
 
 import com.google.common.base.Optional;
@@ -33,6 +33,8 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.xcode.util.Value;
+
+import java.util.Map;
 
 /**
  * Contains information regarding the creation of an iOS bundle.
@@ -101,7 +103,7 @@ final class Bundling extends Value<Bundling> {
 
       NestedSet<Artifact> mergeZips = NestedSetBuilder.<Artifact>stableOrder()
           .addAll(actoolzipOutput.asSet())
-          .addTransitive(objcProvider.get(STORYBOARD_OUTPUT_ZIP))
+          .addTransitive(objcProvider.get(MERGE_ZIP))
           .build();
       NestedSet<Artifact> bundleContentArtifacts = NestedSetBuilder.<Artifact>stableOrder()
           .addTransitive(nestedBundleContentArtifacts(objcProvider.get(NESTED_BUNDLE)))
@@ -237,6 +239,17 @@ final class Bundling extends Value<Bundling> {
    */
   public NestedSet<Artifact> getMergeZips() {
     return mergeZips;
+  }
+
+  /**
+   * Returns the variable substitutions that should be used when merging the plist info file of
+   * this bundle.
+   */
+  public Map<String, String> variableSubstitutions() {
+    return ImmutableMap.of(
+        "EXECUTABLE_NAME", name,
+        "BUNDLE_NAME", name + bundleDirSuffix,
+        "PRODUCT_NAME", name);
   }
 
   /**

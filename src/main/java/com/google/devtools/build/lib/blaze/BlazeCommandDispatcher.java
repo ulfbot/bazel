@@ -394,7 +394,7 @@ public class BlazeCommandDispatcher {
         // Allow the command to edit options after parsing:
         command.editOptions(runtime, optionsParser);
       } catch (AbruptExitException e) {
-        outErr.printErrLn(e.getMessage());
+        reporter.handle(Event.error(e.getMessage()));
         return e.getExitCode().getNumericExitCode();
       }
 
@@ -506,7 +506,7 @@ public class BlazeCommandDispatcher {
     List<String> result = new ArrayList<>();
     getCommandNamesToParseHelper(commandAnnotation, result);
     result.add("common");
-    Lists.reverse(result);
+    // TODO(bazel-team): This statement is a NO-OP: Lists.reverse(result);
     return result;
   }
 

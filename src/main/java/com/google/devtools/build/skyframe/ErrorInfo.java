@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
+import com.google.devtools.build.skyframe.SkyFunctionException.ReifiedSkyFunctionException;
 
 import java.io.Serializable;
 import java.util.Collection;
@@ -41,22 +42,18 @@ public class ErrorInfo implements Serializable {
    * an error value is encountered from an earlier --keep_going build, the exception to be thrown is
    * taken from here.
    */
-  @Nullable private final Throwable exception;
-  @Nullable private final SkyKey rootCauseOfException;
+  @Nullable private final Exception exception;
+  private final SkyKey rootCauseOfException;
 
   private final Iterable<CycleInfo> cycles;
 
   private final boolean isTransient;
   private final boolean isCatastrophic;
 
-  public ErrorInfo(SkyFunctionException builderException, SkyKey skyKey) {
-    this.rootCauses = NestedSetBuilder.create(Order.STABLE_ORDER,
-        Preconditions.checkNotNull(builderException.getRootCauseSkyKey(), builderException));
+  public ErrorInfo(ReifiedSkyFunctionException builderException) {
+    this.rootCauseOfException = builderException.getRootCauseSkyKey();
+    this.rootCauses = NestedSetBuilder.create(Order.STABLE_ORDER, rootCauseOfException);
     this.exception = Preconditions.checkNotNull(builderException.getCause(), builderException);
-    // Note that SkyFunctions can put an arbitrary SkyKey in their thrown SkyFunctionException.
-    // TODO(bazel-team): Clean up SkyFunctionException's notion of "root cause" so we can start
-    // trusting that.
-    this.rootCauseOfException = skyKey;
     this.cycles = ImmutableList.of();
     this.isTransient = builderException.isTransient();
     this.isCatastrophic = builderException.isCatastrophic();
@@ -77,7 +74,7 @@ public class ErrorInfo implements Serializable {
         "Error value %s with no exception must depend on another error value", currentValue);
     NestedSetBuilder<SkyKey> builder = NestedSetBuilder.stableOrder();
     ImmutableList.Builder<CycleInfo> cycleBuilder = ImmutableList.builder();
-    Throwable firstException = null;
+    Exception firstException = null;
     SkyKey firstChildKey = null;
     boolean isTransient = false;
     boolean isCatastrophic = false;
@@ -120,7 +117,7 @@ public class ErrorInfo implements Serializable {
    * The exception thrown when building a value. May be null if value's only error is depending
    * on a cycle.
    */
-  @Nullable public Throwable getException() {
+  @Nullable public Exception getException() {
     return exception;
   }
 

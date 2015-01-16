@@ -18,10 +18,29 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Stopwatch;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
 import com.google.common.eventbus.EventBus;
 import com.google.devtools.build.lib.actions.BuildFailedException;
 import com.google.devtools.build.lib.actions.ExecutorInitException;
 import com.google.devtools.build.lib.actions.TestExecException;
+import com.google.devtools.build.lib.analysis.AnalysisPhaseCompleteEvent;
+import com.google.devtools.build.lib.analysis.BuildInfoEvent;
+import com.google.devtools.build.lib.analysis.BuildView;
+import com.google.devtools.build.lib.analysis.BuildView.AnalysisResult;
+import com.google.devtools.build.lib.analysis.ConfigurationsCreatedEvent;
+import com.google.devtools.build.lib.analysis.ConfiguredAttributeMapper;
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.LicensesProvider;
+import com.google.devtools.build.lib.analysis.LicensesProvider.TargetLicense;
+import com.google.devtools.build.lib.analysis.MakeEnvironmentEvent;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget;
+import com.google.devtools.build.lib.analysis.ViewCreationFailedException;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.BuildConfigurationCollection;
+import com.google.devtools.build.lib.analysis.config.BuildConfigurationKey;
+import com.google.devtools.build.lib.analysis.config.BuildOptions;
+import com.google.devtools.build.lib.analysis.config.DefaultsPackage;
+import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.blaze.BlazeRuntime;
 import com.google.devtools.build.lib.buildtool.BuildRequest.BuildRequestOptions;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildCompleteEvent;
@@ -35,6 +54,7 @@ import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.packages.InputFile;
 import com.google.devtools.build.lib.packages.License;
 import com.google.devtools.build.lib.packages.License.DistributionType;
+import com.google.devtools.build.lib.packages.PackageIdentifier;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.packages.TargetUtils;
@@ -49,24 +69,6 @@ import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.AnalysisPhaseCompleteEvent;
-import com.google.devtools.build.lib.view.BuildInfoEvent;
-import com.google.devtools.build.lib.view.BuildView;
-import com.google.devtools.build.lib.view.BuildView.AnalysisResult;
-import com.google.devtools.build.lib.view.ConfigurationsCreatedEvent;
-import com.google.devtools.build.lib.view.ConfiguredAttributeMapper;
-import com.google.devtools.build.lib.view.ConfiguredTarget;
-import com.google.devtools.build.lib.view.LicensesProvider;
-import com.google.devtools.build.lib.view.LicensesProvider.TargetLicense;
-import com.google.devtools.build.lib.view.MakeEnvironmentEvent;
-import com.google.devtools.build.lib.view.RuleConfiguredTarget;
-import com.google.devtools.build.lib.view.ViewCreationFailedException;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
-import com.google.devtools.build.lib.view.config.BuildConfigurationCollection;
-import com.google.devtools.build.lib.view.config.BuildConfigurationKey;
-import com.google.devtools.build.lib.view.config.BuildOptions;
-import com.google.devtools.build.lib.view.config.DefaultsPackage;
-import com.google.devtools.build.lib.view.config.InvalidConfigurationException;
 
 import java.util.Collection;
 import java.util.Map;
@@ -165,7 +167,8 @@ public class BuildTool {
         }
       }
       configurations = getConfigurations(
-          runtime.getBuildConfigurationKey(buildOptions, request.getMultiCpus()));
+          runtime.getBuildConfigurationKey(buildOptions, request.getMultiCpus()),
+          request.getViewOptions().keepGoing);
 
       getEventBus().post(new ConfigurationsCreatedEvent(configurations));
       runtime.throwPendingException();
@@ -188,7 +191,7 @@ public class BuildTool {
       // Execution phase.
       if (needsExecutionPhase(request.getBuildOptions())) {
         executionTool.executeBuild(analysisResult, result, runtime.getSkyframeExecutor(),
-            configurations, mergePackageRoots(loadingResult.getPackageRoots(), 
+            configurations, mergePackageRoots(loadingResult.getPackageRoots(),
             runtime.getSkyframeExecutor().getPackageRoots()));
       }
 
@@ -226,18 +229,22 @@ public class BuildTool {
     }
   }
 
-  private ImmutableMap<PathFragment, Path> mergePackageRoots(ImmutableMap<PathFragment, Path> first,
-      ImmutableMap<PathFragment, Path> second) {
-    ImmutableMap.Builder<PathFragment, Path> builder = new ImmutableMap.Builder<>();
-    builder.putAll(first);
-    for (Map.Entry<PathFragment, Path> entry : second.entrySet()) {
+  private ImmutableMap<PathFragment, Path> mergePackageRoots(
+      ImmutableMap<PackageIdentifier, Path> first,
+      ImmutableMap<PackageIdentifier, Path> second) {
+    Map<PathFragment, Path> builder = Maps.newHashMap();
+    for (Map.Entry<PackageIdentifier, Path> entry : first.entrySet()) {
+      builder.put(entry.getKey().getPackageFragment(), entry.getValue());
+    }
+    for (Map.Entry<PackageIdentifier, Path> entry : second.entrySet()) {
       if (first.containsKey(entry.getKey())) {
         Preconditions.checkState(first.get(entry.getKey()).equals(entry.getValue()));
       } else {
-        builder.put(entry);
+        // This could overwrite entries from first in other repositories.
+        builder.put(entry.getKey().getPackageFragment(), entry.getValue());
       }
     }
-    return builder.build();
+    return ImmutableMap.copyOf(builder);
   }
 
   private void reportExceptionError(Exception e) {
@@ -311,12 +318,13 @@ public class BuildTool {
     return result;
   }
 
-  protected final BuildConfigurationCollection getConfigurations(BuildConfigurationKey key)
+  protected final BuildConfigurationCollection getConfigurations(BuildConfigurationKey key,
+      boolean keepGoing)
       throws InvalidConfigurationException, InterruptedException {
     SkyframeExecutor executor = runtime.getSkyframeExecutor();
     // TODO(bazel-team): consider a possibility of moving ConfigurationFactory construction into
     // skyframe.
-    return executor.createConfigurations(runtime.getConfigurationFactory(), key);
+    return executor.createConfigurations(keepGoing, runtime.getConfigurationFactory(), key);
   }
 
   @VisibleForTesting
@@ -338,7 +346,7 @@ public class BuildTool {
       }
 
       @Override
-      public void notifyVisitedPackages(Set<PathFragment> visitedPackages) {
+      public void notifyVisitedPackages(Set<PackageIdentifier> visitedPackages) {
         runtime.getSkyframeExecutor().updateLoadedPackageSet(visitedPackages);
       }
     };

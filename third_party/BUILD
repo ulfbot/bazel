@@ -6,33 +6,61 @@ filegroup(
         ":windows_mingw": ["protobuf/protoc.exe"],
         ":windows_msys64_mingw64": ["protobuf/protoc.exe"],
         ":windows_clang": ["protobuf/protoc.exe"],
+        ":darwin": ["protobuf/protoc.darwin"],
         "//conditions:default": ["protobuf/protoc.amd64"],
     }),
 )
 
-filegroup(
+java_import(
     name = "protobuf",
-    srcs = ["protobuf/protobuf-2.5.0.jar"],
+    jars = ["protobuf/protobuf-2.5.0.jar"],
 )
 
-filegroup(
-    name = "third_party",
-    srcs = [
-        "gson/gson-2.2.4.jar",
-        "guava/guava-17.0.jar",
-        "joda-time/joda-time-2.3.jar",
-        "jsr305/jsr-305.jar",
-        "protobuf/protobuf-2.5.0.jar",
-    ],
+java_import(
+    name = "gson",
+    jars = ["gson/gson-2.2.4.jar"],
 )
 
-filegroup(
-    name = "third_party_test_utils",
-    srcs = [
-        "guava/guava-testlib.jar",
+java_import(
+    name = "guava",
+    jars = ["guava/guava-18.0.jar"],
+)
+
+java_import(
+    name = "joda-time",
+    jars = ["joda-time/joda-time-2.3.jar"],
+)
+
+java_import(
+    name = "jsr305",
+    jars = ["jsr305/jsr-305.jar"],
+)
+
+java_import(
+    name = "guava-testlib",
+    jars = ["guava/guava-testlib.jar"],
+)
+
+java_import(
+    name = "mockito",
+    jars = ["mockito/mockito-all-1.10.19.jar"],
+)
+
+java_import(
+    name = "truth",
+    jars = ["truth/truth-0.24+.jar"],
+)
+
+java_import(
+    name = "apache_commons_compress",
+    jars = ["apache_commons_compress/apache-commons-compress-1.9.jar"],
+)
+
+java_import(
+    name = "junit4",
+    jars = [
         "hamcrest/hamcrest-core-1.3.jar",
         "junit/junit-4.11.jar",
-        "truth/truth-0.23.jar",
     ],
 )
 
@@ -49,4 +77,9 @@ config_setting(
 config_setting(
     name = "windows_clang",
     values = {"compiler": "windows_clang"},
+)
+
+config_setting(
+    name = "darwin",
+    values = {"cpu": "darwin"},
 )

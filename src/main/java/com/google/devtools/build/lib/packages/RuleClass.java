@@ -33,6 +33,7 @@ import com.google.devtools.build.lib.syntax.FuncallExpression;
 import com.google.devtools.build.lib.syntax.GlobList;
 import com.google.devtools.build.lib.syntax.Ident;
 import com.google.devtools.build.lib.syntax.Label;
+import com.google.devtools.build.lib.syntax.Label.SyntaxException;
 import com.google.devtools.build.lib.syntax.SkylarkEnvironment;
 import com.google.devtools.build.lib.syntax.UserDefinedFunction;
 import com.google.devtools.build.lib.util.StringUtil;
@@ -41,6 +42,7 @@ import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -388,6 +390,7 @@ public final class RuleClass {
     private PredicateWithMessage<Rule> validityPredicate =
         PredicatesWithMessage.<Rule>alwaysTrue();
     private Predicate<String> preferredDependencyPredicate = Predicates.alwaysFalse();
+    private List<Class<?>> advertisedProviders = new ArrayList<>();
     private UserDefinedFunction configuredTargetFunction = null;
     private SkylarkEnvironment ruleDefinitionEnvironment = null;
 
@@ -428,10 +431,12 @@ public final class RuleClass {
       // TODO(bazel-team): move this testonly attribute setting to somewhere else
       // preferably to some base RuleClass implementation.
       if (this.type.equals(RuleClassType.TEST)) {
+        Attribute.Builder<Boolean> testOnlyAttr = attr("testonly", BOOLEAN).value(true)
+            .nonconfigurable("policy decision: this shouldn't depend on the configuration");
         if (attributes.containsKey("testonly")) {
-          override(attr("testonly", BOOLEAN).nonconfigurable().value(true));
+          override(testOnlyAttr);
         } else {
-          add(attr("testonly", BOOLEAN).nonconfigurable().value(true));
+          add(testOnlyAttr);
         }
       }
     }
@@ -463,8 +468,8 @@ public final class RuleClass {
       return new RuleClass(name, skylarkExecutable, documented, publicByDefault, binaryOutput,
           workspaceOnly, outputsDefaultExecutable, implicitOutputsFunction, configurator,
           configuredTargetFactory, validityPredicate, preferredDependencyPredicate,
-          configuredTargetFunction, ruleDefinitionEnvironment,
-          attributes.values().toArray(new Attribute[0]));
+          ImmutableSet.copyOf(advertisedProviders), configuredTargetFunction,
+          ruleDefinitionEnvironment, attributes.values().toArray(new Attribute[0]));
     }
 
     public Builder setUndocumented() {
@@ -536,6 +541,27 @@ public final class RuleClass {
 
     public Builder setPreferredDependencyPredicate(Predicate<String> predicate) {
       this.preferredDependencyPredicate = predicate;
+      return this;
+    }
+
+    /**
+     * State that the rule class being built possibly supplies the specified provider to its direct
+     * dependencies.
+     *
+     * <p>When computing the set of aspects required for a rule, only the providers listed here are
+     * considered. The presence of a provider here does not mean that the rule <b>must</b> implement
+     * said provider, merely that it <b>can</b>. After the configured target is constructed from
+     * this rule, aspects will be filtered according to the set of actual providers.
+     *
+     * <p>This is here so that we can do the loading phase overestimation required for
+     * "blaze query", which does not have the configured targets available.
+     *
+     * <p>It's okay for the rule class eventually not to supply it (possibly based on analysis phase
+     * logic), but if a provider is not advertised but is supplied, aspects that require the it will
+     * not be evaluated for the rule.
+     */
+    public Builder advertiseProvider(Class<?>... providers) {
+      Collections.addAll(advertisedProviders, providers);
       return this;
     }
 
@@ -698,6 +724,11 @@ public final class RuleClass {
   private final Predicate<String> preferredDependencyPredicate;
 
   /**
+   * The list of transitive info providers this class advertises to aspects.
+   */
+  private final ImmutableSet<Class<?>> advertisedProviders;
+
+  /**
    * The Skylark rule implementation of this RuleClass. Null for non Skylark executable RuleClasses.
    */
   @Nullable private final UserDefinedFunction configuredTargetFunction;
@@ -738,6 +769,7 @@ public final class RuleClass {
       Configurator<?, ?> configurator,
       ConfiguredTargetFactory<?, ?> configuredTargetFactory,
       PredicateWithMessage<Rule> validityPredicate, Predicate<String> preferredDependencyPredicate,
+      ImmutableSet<Class<?>> advertisedProviders,
       @Nullable UserDefinedFunction configuredTargetFunction,
       @Nullable SkylarkEnvironment ruleDefinitionEnvironment, Attribute... attributes) {
     this.name = name;
@@ -751,6 +783,7 @@ public final class RuleClass {
     this.configuredTargetFactory = configuredTargetFactory;
     this.validityPredicate = validityPredicate;
     this.preferredDependencyPredicate = preferredDependencyPredicate;
+    this.advertisedProviders = advertisedProviders;
     this.configuredTargetFunction = configuredTargetFunction;
     this.ruleDefinitionEnvironment = ruleDefinitionEnvironment;
     // Do not make a defensive copy as builder does that already
@@ -874,6 +907,25 @@ public final class RuleClass {
   }
 
   /**
+   * Returns the set of advertised transitive info providers.
+   *
+   * <p>When computing the set of aspects required for a rule, only the providers listed here are
+   * considered. The presence of a provider here does not mean that the rule <b>must</b> implement
+   * said provider, merely that it <b>can</b>. After the configured target is constructed from this
+   * rule, aspects will be filtered according to the set of actual providers.
+   *
+   * <p>This is here so that we can do the loading phase overestimation required for "blaze query",
+   * which does not have the configured targets available.
+   *
+   * <p>This should in theory only contain subclasses of
+   * {@link com.google.devtools.build.lib.analysis.TransitiveInfoProvider}, but our current dependency
+   * structure does not allow a reference to that class here.
+   */
+  public ImmutableSet<Class<?>> getAdvertisedProviders() {
+    return advertisedProviders;
+  }
+
+  /**
    * For --compile_one_dependency: if multiple rules consume the specified target,
    * should we choose this one over the "unpreferred" options?
    */
@@ -886,15 +938,15 @@ public final class RuleClass {
    */
   Rule createRuleWithLabel(Package.AbstractBuilder<?, ?> pkgBuilder, Label ruleLabel,
       Map<String, Object> attributeValues, EventHandler eventHandler, FuncallExpression ast,
-      boolean retainAST, Location location) {
-    Rule rule = pkgBuilder.newRuleWithLabel(ruleLabel, this, retainAST ? ast : null,
-        location);
+      Location location) throws SyntaxException {
+    Rule rule = pkgBuilder.newRuleWithLabel(ruleLabel, this, null, location);
     createRuleCommon(rule, pkgBuilder, attributeValues, eventHandler, ast);
     return rule;
   }
 
   private void createRuleCommon(Rule rule, Package.AbstractBuilder<?, ?> pkgBuilder,
-      Map<String, Object> attributeValues, EventHandler eventHandler, FuncallExpression ast) {
+      Map<String, Object> attributeValues, EventHandler eventHandler, FuncallExpression ast)
+          throws SyntaxException {
     populateRuleAttributeValues(
         rule, pkgBuilder, attributeValues, eventHandler, ast);
     rule.populateOutputFiles(eventHandler, pkgBuilder);
@@ -935,7 +987,8 @@ public final class RuleClass {
   @SuppressWarnings("unchecked")
   Rule createRuleWithParsedAttributeValues(Label label,
       Package.AbstractBuilder<?, ?> pkgBuilder, Location ruleLocation,
-      Map<String, ParsedAttributeValue> attributeValues, EventHandler eventHandler) {
+      Map<String, ParsedAttributeValue> attributeValues, EventHandler eventHandler) 
+          throws SyntaxException{
     Rule rule = pkgBuilder.newRuleWithLabel(label, this, null, ruleLocation);
     rule.checkValidityPredicate(eventHandler);
 

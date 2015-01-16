@@ -26,6 +26,9 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.actions.CommandLine;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.collect.CollectionUtils;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.rules.cpp.Link.LinkStaticness;
@@ -34,9 +37,6 @@ import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.util.ShellEscaper;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.actions.CommandLine;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -710,8 +710,8 @@ public final class LinkCommandLine extends CommandLine {
         // them.
         //
         // Note that we have to do this because $ORIGIN points to different paths for
-        // different targets. In other words, blaze-bin/p1/p2/p3/a_shareddeps.so and
-        // blaze-bin/p4/b_shareddeps.so have different path depths. The first could
+        // different targets. In other words, blaze-bin/d1/d2/d3/a_shareddeps.so and
+        // blaze-bin/d4/b_shareddeps.so have different path depths. The first could
         // reference a standard blaze-bin/_solib_[arch] via $ORIGIN/../../../_solib[arch],
         // and the second could use $ORIGIN/../_solib_[arch]. But since this is a shared
         // artifact, both are symlinks to the same place, so

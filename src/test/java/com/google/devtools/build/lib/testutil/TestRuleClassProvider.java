@@ -20,14 +20,14 @@ import static com.google.devtools.build.lib.packages.Type.LABEL_LIST;
 import static com.google.devtools.build.lib.packages.Type.OUTPUT_LIST;
 import static com.google.devtools.build.lib.packages.Type.STRING_LIST;
 
+import com.google.devtools.build.lib.analysis.BaseRuleClasses;
+import com.google.devtools.build.lib.analysis.BlazeRule;
+import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
+import com.google.devtools.build.lib.analysis.RuleDefinition;
+import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.util.FileTypeSet;
-import com.google.devtools.build.lib.view.BaseRuleClasses;
-import com.google.devtools.build.lib.view.BlazeRule;
-import com.google.devtools.build.lib.view.ConfiguredRuleClassProvider;
-import com.google.devtools.build.lib.view.RuleDefinition;
-import com.google.devtools.build.lib.view.RuleDefinitionEnvironment;
 
 import java.lang.reflect.Method;
 
@@ -37,7 +37,10 @@ import java.lang.reflect.Method;
 public class TestRuleClassProvider {
   private static ConfiguredRuleClassProvider ruleProvider = null;
 
-  private static void setup(ConfiguredRuleClassProvider.Builder builder) {
+  /**
+   * Adds all the rule classes supported internally within the build tool to the given builder.
+   */
+  public static void addStandardRules(ConfiguredRuleClassProvider.Builder builder) {
     try {
       Class<?> providerClass = Class.forName(TestConstants.TEST_RULE_CLASS_PROVIDER);
       Method setupMethod = providerClass.getMethod("setup",
@@ -55,7 +58,7 @@ public class TestRuleClassProvider {
     if (ruleProvider == null) {
       ConfiguredRuleClassProvider.Builder builder =
           new ConfiguredRuleClassProvider.Builder();
-      setup(builder);
+      addStandardRules(builder);
       builder.addRuleDefinition(TestingDummyRule.class);
       ruleProvider = builder.build();
     }

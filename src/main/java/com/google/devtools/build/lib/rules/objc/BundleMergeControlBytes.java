@@ -14,13 +14,12 @@
 
 package com.google.devtools.build.lib.rules.objc;
 
-import static com.google.devtools.build.lib.rules.objc.IosSdkCommands.MINIMUM_OS_VERSION;
-import static com.google.devtools.build.lib.rules.objc.IosSdkCommands.TARGET_DEVICE_FAMILIES;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.BUNDLE_FILE;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.NESTED_BUNDLE;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.XCDATAMODEL;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.io.ByteSource;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.xcode.bundlemerge.proto.BundleMergeProtos;
@@ -42,14 +41,15 @@ final class BundleMergeControlBytes extends ByteSource {
   private final Bundling rootBundling;
   private final Artifact mergedIpa;
   private final ObjcConfiguration objcConfiguration;
-  private final Map<String, String> variableSubstitutions;
+  private final ImmutableSet<TargetDeviceFamily> families;
 
-  public BundleMergeControlBytes(Bundling rootBundling, Artifact mergedIpa,
-      ObjcConfiguration objcConfiguration, Map<String, String> variableSubstitutions) {
+  public BundleMergeControlBytes(
+      Bundling rootBundling, Artifact mergedIpa, ObjcConfiguration objcConfiguration,
+      ImmutableSet<TargetDeviceFamily> families) {
     this.rootBundling = Preconditions.checkNotNull(rootBundling);
     this.mergedIpa = Preconditions.checkNotNull(mergedIpa);
     this.objcConfiguration = Preconditions.checkNotNull(objcConfiguration);
-    this.variableSubstitutions = Preconditions.checkNotNull(variableSubstitutions);
+    this.families = Preconditions.checkNotNull(families);
   }
 
   @Override
@@ -69,9 +69,8 @@ final class BundleMergeControlBytes extends ByteSource {
         .addAllBundleFile(BundleableFile.toBundleFiles(objcProvider.get(BUNDLE_FILE)))
         .addAllSourcePlistFile(Artifact.toExecPaths(
             bundling.getInfoplistMerging().getPlistWithEverything().asSet()))
-        // TODO(bazel-team): Add rule attributes for specifying targeted device family and minimum
-        // OS version.
-        .setMinimumOsVersion(MINIMUM_OS_VERSION)
+        // TODO(bazel-team): Add rule attribute for specifying targeted device family
+        .setMinimumOsVersion(objcConfiguration.getMinimumOs())
         .setSdkVersion(objcConfiguration.getIosSdkVersion())
         .setPlatform(objcConfiguration.getPlatform().name())
         .setBundleRoot(bundleDir);
@@ -89,11 +88,11 @@ final class BundleMergeControlBytes extends ByteSource {
           .setSourcePath(datamodel.getOutputZip().getExecPathString())
           .build());
     }
-    for (TargetDeviceFamily targetDeviceFamily : TARGET_DEVICE_FAMILIES) {
+    for (TargetDeviceFamily targetDeviceFamily : families) {
       control.addTargetDeviceFamily(targetDeviceFamily.name());
     }
 
-    // TODO(bazel-team): Should we use different variable substitutions for nested bundles?
+    Map<String, String> variableSubstitutions = bundling.variableSubstitutions();
     for (String variable : variableSubstitutions.keySet()) {
       control.addVariableSubstitution(VariableSubstitution.newBuilder()
           .setName(variable)
@@ -104,10 +103,13 @@ final class BundleMergeControlBytes extends ByteSource {
     control.setOutFile(mergedIpa.getExecPathString());
 
     for (Artifact linkedBinary : bundling.getLinkedBinary().asSet()) {
-      control.addBundleFile(BundleMergeProtos.BundleFile.newBuilder()
-          .setSourceFile(linkedBinary.getExecPathString())
-          .setBundlePath(bundling.getName())
-          .build());
+      control
+          .addBundleFile(BundleMergeProtos.BundleFile.newBuilder()
+              .setSourceFile(linkedBinary.getExecPathString())
+              .setBundlePath(bundling.getName())
+              .setExternalFileAttribute(BundleableFile.EXECUTABLE_EXTERNAL_FILE_ATTRIBUTE)
+              .build())
+          .setExecutableName(bundling.getName());
     }
 
     for (Bundling nestedBundling : bundling.getObjcProvider().get(NESTED_BUNDLE)) {

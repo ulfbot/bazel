@@ -21,6 +21,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSortedSet;
 import com.google.devtools.build.lib.actions.Artifact.SpecialArtifactType;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
+import com.google.devtools.build.lib.packages.PackageIdentifier;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
@@ -51,7 +52,7 @@ public class ArtifactFactory implements ArtifactResolver, ArtifactSerializer, Ar
    * Map of package names to source root paths so that we can create source
    * artifact paths given execPaths in the symlink forest.
    */
-  private ImmutableMap<PathFragment, Root> packageRoots;
+  private ImmutableMap<PackageIdentifier, Root> packageRoots;
 
   /**
    * Reverse-ordered list of derived roots for use in looking up or (in rare cases) creating
@@ -90,7 +91,7 @@ public class ArtifactFactory implements ArtifactResolver, ArtifactSerializer, Ar
    * @param packageRoots the map of package names to source artifact roots to
    *        use.
    */
-  public synchronized void setPackageRoots(Map<PathFragment, Root> packageRoots) {
+  public synchronized void setPackageRoots(Map<PackageIdentifier, Root> packageRoots) {
     this.packageRoots = ImmutableMap.copyOf(packageRoots);
   }
 
@@ -170,18 +171,12 @@ public class ArtifactFactory implements ArtifactResolver, ArtifactSerializer, Ar
     return getArtifact(path, root, path.relativeTo(execRoot), owner, SpecialArtifactType.FILESET);
   }
 
-  public Artifact getSpecialMetadataHandlingArtifact(PathFragment rootRelativePath, Root root,
-      ArtifactOwner owner, boolean forceConstantMetadata, boolean forceDigestMetadata) {
+  public Artifact getConstantMetadataArtifact(PathFragment rootRelativePath, Root root,
+      ArtifactOwner owner) {
     validatePath(rootRelativePath, root);
     Path path = root.getPath().getRelative(rootRelativePath);
-    SpecialArtifactType type = null;
-    if (forceConstantMetadata) {
-      Preconditions.checkArgument(!forceDigestMetadata);
-      type = SpecialArtifactType.FORCE_CONSTANT_METADATA;
-    } else if (forceDigestMetadata) {
-      type = SpecialArtifactType.FORCE_DIGEST_METADATA;
-    }
-    return getArtifact(path, root, path.relativeTo(execRoot), owner, type);
+    return getArtifact(
+        path, root, path.relativeTo(execRoot), owner, SpecialArtifactType.CONSTANT_METADATA);
   }
 
   /**
@@ -244,7 +239,7 @@ public class ArtifactFactory implements ArtifactResolver, ArtifactSerializer, Ar
     // prefix, and then use the corresponding source root to create a new artifact.
     for (PathFragment dir = execPath.getParentDirectory(); dir != null;
          dir = dir.getParentDirectory()) {
-      Root sourceRoot = packageRoots.get(dir);
+      Root sourceRoot = packageRoots.get(PackageIdentifier.createInDefaultRepo(dir));
       if (sourceRoot != null) {
         return getSourceArtifact(execPath, sourceRoot, ArtifactOwner.NULL_OWNER);
       }
@@ -303,7 +298,8 @@ public class ArtifactFactory implements ArtifactResolver, ArtifactSerializer, Ar
    *
    * @param execPath the exec path of the artifact
    */
-  public Artifact deserializeArtifact(PathFragment execPath) {
+  public Artifact deserializeArtifact(PathFragment execPath, PackageRootResolver resolver) {
+    Preconditions.checkArgument(!execPath.isAbsolute(), execPath);
     Path path = execRoot.getRelative(execPath);
     Root root = findDerivedRoot(path);
 
@@ -315,24 +311,15 @@ public class ArtifactFactory implements ArtifactResolver, ArtifactSerializer, Ar
       if (oldResult != null) {
         result = oldResult;
       }
+      return result;
     } else {
-      for (PathFragment dir = execPath.getParentDirectory(); dir != null;
-          dir = dir.getParentDirectory()) {
-        root = packageRoots.get(dir);
-        if (root != null) {
-          break;
-        }
-      }
-
-      if (root == null) {
-        // Root not found. Return null to indicate that we could not create the artifact.
+      root = resolver.findPackageRoot(execPath);
+      if (root != null) {
+        return getSourceArtifact(execPath, root, ArtifactOwner.NULL_OWNER);
+      } else {
         return null;
       }
-
-      result = getSourceArtifact(execPath, root, ArtifactOwner.NULL_OWNER);
     }
-
-    return result;
   }
 
   @Override

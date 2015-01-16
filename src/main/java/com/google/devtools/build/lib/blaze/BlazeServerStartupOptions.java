@@ -197,9 +197,11 @@ public class BlazeServerStartupOptions extends OptionsBase {
   public boolean batchCpuScheduling;
 
   @Option(name = "blazerc",
-      defaultValue = "./.blazerc, then ~/.blazerc",  // NOTE: purely decorative!
+      // NOTE: purely decorative!
+      defaultValue = "In the current directory, then in the user's home directory, the file named "
+         + ".$(basename $0)rc (i.e. .bazelrc for Bazel or .blazerc for Blaze)",
       category = "misc",
-      help = "The location of the .blazerc file containing default values of "
+      help = "The location of the .bazelrc/.blazerc file containing default values of "
           + "Blaze command options.  Use /dev/null to disable the search for a "
           + "blazerc file, e.g. in release builds.")
   public String blazerc;
@@ -207,20 +209,9 @@ public class BlazeServerStartupOptions extends OptionsBase {
   @Option(name = "master_blazerc",
       defaultValue = "true",  // NOTE: purely decorative!
       category = "misc",
-      help = "If this option is false, the master blazerc next to the binary "
+      help = "If this option is false, the master blazerc/bazelrc next to the binary "
           + "is not read.")
   public boolean masterBlazerc;
-
-  @Option(name = "blaze_cpu",
-      defaultValue = "piii",
-      category = "server startup",
-      help = "Determines whether to use a 32-bit or 64-bin blaze binary. 'blaze --blaze_cpu=k8' "
-          + "will switch to 'blaze64', and 'blaze64 --blaze_cpu=pii' will switch to 'blaze'. "
-          + "This only works if the 'blaze' and 'blaze64' binaries are located next to each "
-          + "other in the same directory. The Blaze release process checks in two related "
-          + "binaries under //tools:blaze and //tools:blaze64, but custom Blaze binaries don't "
-          + "necessarily come in pairs. If the other binary is not found, a warning is printed.")
-  public String blazeCpu;
 
   @Option(name = "skyframe",
       converter = SkyframeModeConverter.class,

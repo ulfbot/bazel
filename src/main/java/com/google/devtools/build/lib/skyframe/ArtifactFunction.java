@@ -16,13 +16,11 @@ package com.google.devtools.build.lib.skyframe;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
-import com.google.common.eventbus.EventBus;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.Action.MiddlemanType;
 import com.google.devtools.build.lib.actions.ActionExecutionException;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactOwner;
-import com.google.devtools.build.lib.actions.MissingArtifactEvent;
 import com.google.devtools.build.lib.actions.MissingInputFileException;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
@@ -34,24 +32,21 @@ import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
+import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 
 import java.io.IOException;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * A builder for {@link ArtifactValue}s.
  */
 class ArtifactFunction implements SkyFunction {
 
-  private final AtomicReference<EventBus> eventBus;
   private final Predicate<PathFragment> allowedMissingInputs;
 
-  ArtifactFunction(AtomicReference<EventBus> eventBus,
-      Predicate<PathFragment> allowedMissingInputs) {
-    this.eventBus = eventBus;
+  ArtifactFunction(Predicate<PathFragment> allowedMissingInputs) {
     this.allowedMissingInputs = allowedMissingInputs;
   }
 
@@ -63,10 +58,10 @@ class ArtifactFunction implements SkyFunction {
       try {
         return createSourceValue(artifact, ownedArtifact.isMandatory(), env);
       } catch (MissingInputFileException e) {
-        if (eventBus.get() != null) {
-          eventBus.get().post(new MissingArtifactEvent(artifact.getOwner()));
-        }
-        throw new ArtifactFunctionException(skyKey, e);
+        // The error is not necessarily truly transient, but we mark it as such because we have
+        // the above side effect of posting an event to the EventBus. Importantly, that event
+        // is potentially used to report root causes.
+        throw new ArtifactFunctionException(e, Transience.TRANSIENT);
       }
     }
 
@@ -88,7 +83,8 @@ class ArtifactFunction implements SkyFunction {
         ActionExecutionException ex = new ActionExecutionException(e, action,
             /*catastrophe=*/false);
         env.getListener().handle(Event.error(ex.getLocation(), ex.getMessage()));
-        throw new ArtifactFunctionException(skyKey, ex);
+        // This is a transient error since we did the work that led to the IOException.
+        throw new ArtifactFunctionException(ex, Transience.TRANSIENT);
       }
     } else {
       return createAggregatingValue(artifact, action, actionValue.getArtifactValue(artifact), env);
@@ -101,12 +97,10 @@ class ArtifactFunction implements SkyFunction {
         artifact.getPath()));
     FileValue fileValue;
     try {
-      fileValue = (FileValue) env.getValueOrThrow(fileSkyKey, Exception.class);
+      fileValue = (FileValue) env.getValueOrThrow(fileSkyKey, IOException.class,
+          InconsistentFilesystemException.class, FileSymlinkCycleException.class);
     } catch (IOException | InconsistentFilesystemException | FileSymlinkCycleException e) {
       throw makeMissingInputFileExn(artifact, mandatory, e, env.getListener());
-    } catch (Exception e) {
-      // Can't get here.
-      throw new IllegalStateException(e);
     }
     if (fileValue == null) {
       return null;
@@ -202,25 +196,21 @@ class ArtifactFunction implements SkyFunction {
     Preconditions.checkState(artifactOwner instanceof ActionLookupKey, "", artifact, artifactOwner);
     SkyKey actionLookupKey = ActionLookupValue.key((ActionLookupKey) artifactOwner);
     ActionLookupValue value = (ActionLookupValue) env.getValue(actionLookupKey);
-    if (value == null) {
-      // TargetCompletionActionValues are created on demand. All others should already exist --
-      // ConfiguredTargetValues were created during the analysis phase, and BuildInfo*Values were
-      // created during the first analysis of a configured target.
-      Preconditions.checkState(artifactOwner instanceof TargetCompletionKey,
-          "Owner %s of %s not in graph %s", artifactOwner, artifact, actionLookupKey);
-      return null;
-    }
+    // The value should already exist: ConfiguredTargetValues were created during the analysis
+    // phase, and BuildInfo*Values were created during the first analysis of a configured target.
+    Preconditions.checkNotNull(value,
+        "Owner %s of %s not in graph %s", artifactOwner, artifact, actionLookupKey);
     return Preconditions.checkNotNull(value.getGeneratingAction(artifact),
           "Value %s does not contain generating action of %s", value, artifact);
   }
 
   private static final class ArtifactFunctionException extends SkyFunctionException {
-    ArtifactFunctionException(SkyKey key, MissingInputFileException e) {
-      super(key, e);
+    ArtifactFunctionException(MissingInputFileException e, Transience transience) {
+      super(e, transience);
     }
 
-    ArtifactFunctionException(SkyKey key, ActionExecutionException e) {
-      super(key, e);
+    ArtifactFunctionException(ActionExecutionException e, Transience transience) {
+      super(e, transience);
     }
   }
 

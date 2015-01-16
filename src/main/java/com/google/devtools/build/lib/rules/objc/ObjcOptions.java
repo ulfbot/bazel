@@ -14,12 +14,12 @@
 
 package com.google.devtools.build.lib.rules.objc;
 
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
-import com.google.devtools.build.lib.view.ConfiguredTarget;
-import com.google.devtools.build.lib.view.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.view.RuleConfiguredTargetBuilder;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.RunfilesProvider;
 
 /**
  * Implementation for the {@code objc_options} rule.
@@ -32,7 +32,8 @@ public class ObjcOptions implements RuleConfiguredTargetFactory {
         .add(OptionsProvider.class,
             new OptionsProvider.Builder()
                 .addCopts(ruleContext.getTokenizedStringListAttr("copts"))
-                .addInfoplists(ruleContext.getPrerequisiteArtifacts("infoplists", Mode.TARGET))
+                .addInfoplists(
+                    ruleContext.getPrerequisiteArtifacts("infoplists", Mode.TARGET).list())
                 .build())
         .build();
   }

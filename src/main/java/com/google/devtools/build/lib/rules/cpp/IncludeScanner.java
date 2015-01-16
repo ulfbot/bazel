@@ -14,12 +14,15 @@
 
 package com.google.devtools.build.lib.rules.cpp;
 
-import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
+import com.google.devtools.build.lib.actions.ActionExecutionException;
+import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.ArtifactOwner;
 import com.google.devtools.build.lib.actions.EnvironmentalExecException;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.Executor;
@@ -49,16 +52,15 @@ public interface IncludeScanner {
    * method takes into account the path- and file-level hints that are part of
    * this include scanner.
    */
-  public void process(Path source, Map<Path, Path> legalOutputPaths,
-      List<String> cmdlineIncludes, Set<Path> includes,
+  public void process(Artifact source, Map<Artifact, Path> legalOutputPaths,
+      List<String> cmdlineIncludes, Set<Artifact> includes,
       ActionExecutionContext actionExecutionContext)
       throws IOException, ExecException, InterruptedException;
 
   /** Supplies IncludeScanners upon request. */
   interface IncludeScannerSupplier {
     /** Returns the possibly shared scanner to be used for a given pair of include paths. */
-    IncludeScanner scannerFor(List<Path> quoteIncludePaths, List<Path> includePaths,
-        RemoteIncludeExtractor remoteScanner);
+    IncludeScanner scannerFor(List<Path> quoteIncludePaths, List<Path> includePaths);
   }
 
   /**
@@ -77,21 +79,18 @@ public interface IncludeScanner {
      * @param actionExecutionContext the context for {@code action}.
      * @param profilerTaskName what the {@link Profiler} should record this call for.
      */
-    public static List<String> scanForIncludedInputs(IncludeScannable action,
+    public static Collection<Artifact> scanForIncludedInputs(IncludeScannable action,
         IncludeScannerSupplier includeScannerSupplier,
         ActionExecutionContext actionExecutionContext,
         String profilerTaskName)
-            throws ExecException, InterruptedException {
+        throws ExecException, InterruptedException, ActionExecutionException {
 
-      Set<Path> includes = Sets.newConcurrentHashSet();
+      Set<Artifact> includes = Sets.newConcurrentHashSet();
 
       Executor executor = actionExecutionContext.getExecutor();
       Path execRoot = executor.getExecRoot();
 
-      RemoteIncludeExtractor remoteScanner = Preconditions.checkNotNull(
-          executor.getContext(RemoteIncludeExtractor.class),
-          action);
-      List<Path> absoluteBuiltInIncludeDirs = new ArrayList<>();
+      final List<Path> absoluteBuiltInIncludeDirs = new ArrayList<>();
 
       Profiler profiler = Profiler.instance();
       try {
@@ -103,7 +102,7 @@ public interface IncludeScanner {
         for (IncludeScannable scannable :
           Iterables.concat(ImmutableList.of(action), action.getAuxiliaryScannables())) {
 
-          Map<Path, Path> legalOutputPaths = scannable.getLegalGeneratedScannerFileMap();
+          Map<Artifact, Path> legalOutputPaths = scannable.getLegalGeneratedScannerFileMap();
           List<PathFragment> includeDirs = new ArrayList<>(scannable.getIncludeDirs());
           List<PathFragment> quoteIncludeDirs = scannable.getQuoteIncludeDirs();
           List<String> cmdlineIncludes = scannable.getCmdlineIncludes();
@@ -122,14 +121,25 @@ public interface IncludeScanner {
 
           IncludeScanner scanner = includeScannerSupplier.scannerFor(
               relativeTo(execRoot, quoteIncludeDirs),
-              relativeTo(execRoot, includeDirs), remoteScanner);
+              relativeTo(execRoot, includeDirs));
 
-          for (PathFragment sourcePathFragment : scannable.getIncludeScannerSources()) {
-            // Make the source file relative to execution root, so that even inclusions
-            // found relative to the current file are in the output tree.
-            // TODO(bazel-team):  Remove this once relative paths are used during analysis.
-            Path sourcePath = execRoot.getRelative(sourcePathFragment);
-            scanner.process(sourcePath, legalOutputPaths, cmdlineIncludes, includes,
+          for (Artifact source : scannable.getIncludeScannerSources()) {
+            // Add all include scanning entry points to the inputs; this is necessary
+            // when we have more than one source to scan from, for example when building
+            // C++ modules.
+            // In that case we have one of two cases:
+            // 1. We compile a header module - there, the .cppmap file is the main source file
+            //    (which we do not include-scan, as that would require an extra parser), and
+            //    thus already in the input; all headers in the .cppmap file are our entry points
+            //    for include scanning, but are not yet in the inputs - they get added here.
+            // 2. We compile an object file that uses a header module; currently using a header
+            //    module requires all headers it can reference to be available for the compilation.
+            //    The header module can reference headers that are not in the transitive include
+            //    closure of the current translation unit. Therefore, {@code CppCompileAction}
+            //    adds all headers specified transitively for compiled header modules as include
+            //    scanning entry points, and we need to add the entry points to the inputs here.
+            includes.add(source);
+            scanner.process(source, legalOutputPaths, cmdlineIncludes, includes,
                 actionExecutionContext);
           }
         }
@@ -140,17 +150,39 @@ public interface IncludeScanner {
       }
 
       // Collect inputs and output
-      List<String> inputs = new ArrayList<>();
-      for (Path included : includes) {
-        if (FileSystemUtils.startsWithAny(included, absoluteBuiltInIncludeDirs)) {
+      List<Artifact> inputs = new ArrayList<>();
+      IncludeProblems includeProblems = new IncludeProblems();
+      for (Artifact included : includes) {
+        if (FileSystemUtils.startsWithAny(included.getPath(), absoluteBuiltInIncludeDirs)) {
           // Skip include files found in absolute include directories. This currently only applies
           // to grte.
           continue;
         }
-        if (!included.startsWith(execRoot)) {
-          throw new UserExecException("illegal absolute path to include file: " + included);
+        if (included.getRoot().getPath().getParentDirectory() == null) {
+          throw new UserExecException(
+              "illegal absolute path to include file: " + included.getPath());
         }
-        inputs.add(included.relativeTo(execRoot).getPathString());
+        if (!included.isSourceArtifact()
+            && included.getArtifactOwner() == ArtifactOwner.NULL_OWNER) {
+          // Illegal include we had to create an artifact on the fly for -- a derived artifact
+          // never has a null owner unless it was created during include scanning. Since it was
+          // created here, we didn't find the artifact in the map of allowed derived artifacts, so
+          // this artifact is not allowed to be included, and so we eagerly fail even before
+          // compilation (note that it is extremely hard to trigger this case, as opposed to simply
+          // omitting the artifact -- see the comment in LegacyIncludeScanner#locateOnPaths).
+          // This could be an overeager fail in the rare case that we parsed the source file and
+          // found an include statement that would not actually be read as an include statement by
+          // the actual C preprocessor but was a valid output file. But that situation should
+          // practically never occur, and fixing it should be fairly simple, since that #include is
+          // probably never valid.
+          includeProblems.add(included.getExecPathString());
+        } else {
+          inputs.add(included);
+        }
+      }
+      if (includeProblems.hasProblems()) {
+        includeProblems.assertProblemFree((Action) action,
+            action.getIncludeScannerSources().iterator().next());
       }
       return inputs;
     }

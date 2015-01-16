@@ -41,10 +41,12 @@ LDFLAGS=${LDFLAGS:-""}
 EXE_EXT=""
 
 PROTO_FILES=$(ls src/main/protobuf/*.proto)
-LIBRARY_JARS="third_party/gson/gson-2.2.4.jar third_party/guava/guava-17.0.jar third_party/jsr305/jsr-305.jar third_party/protobuf/protobuf-2.5.0.jar third_party/joda-time/joda-time-2.3.jar"
-TEST_LIBRARY_JARS="$LIBRARY_JARS third_party/junit/junit-4.11.jar third_party/truth/truth-0.23.jar third_party/guava/guava-testlib.jar output/classes"
-DIRS=$(echo src/{main/java,tools/xcode-common/java/com/google/devtools/build/xcode/{common,util}})
-JAVA_SRCDIRS="src/main/java src/tools/xcode-common/java output/src"
+LIBRARY_JARS="third_party/gson/gson-2.2.4.jar third_party/guava/guava-18.0.jar third_party/jsr305/jsr-305.jar third_party/protobuf/protobuf-2.5.0.jar third_party/joda-time/joda-time-2.3.jar third_party/apache_commons_compress/apache-commons-compress-1.9.jar"
+DIRS=$(echo src/{main/java,tools/xcode-common/java/com/google/devtools/build/xcode/{common,util}} output/src)
+SINGLEJAR_DIRS="src/java_tools/singlejar/java src/main/java/com/google/devtools/build/lib/shell"
+SINGLEJAR_LIBRARIES="third_party/guava/guava-18.0.jar third_party/jsr305/jsr-305.jar"
+BUILDJAR_DIRS=$(echo src/java_tools/buildjar/java output/src/com/google/devtools/build/lib/view/proto)
+BUILDJAR_LIBRARIES="third_party/guava/guava-18.0.jar third_party/protobuf/protobuf-2.5.0.jar third_party/jsr305/jsr-305.jar"
 
 MSYS_DLLS=""
 PATHSEP=":"
@@ -60,41 +62,87 @@ function log() {
   fi
 }
 
+
+mkdir -p fromhost
+cat << EOF > fromhost/BUILD
+package(default_visibility = ["//visibility:public"])
+EOF
+
 case "${PLATFORM}" in
 linux)
   # Sorry, no static linking on linux for now.
   LDFLAGS="$(pkg-config libarchive --libs) -lrt $LDFLAGS"
   JNILIB="libunix.so"
   MD5SUM="md5sum"
-  # JAVA_HOME must point to a Java 7 installation.
+  # JAVA_HOME must point to a Java 8 installation.
   JAVA_HOME=${JAVA_HOME:-$(readlink -f $(which javac) | sed "s_/bin/javac__")}
   PROTOC=${PROTOC:-third_party/protobuf/protoc.amd64}
+
+cat << EOF >> fromhost/BUILD
+cc_library(
+  name = "libarchive",
+  srcs = [],
+  hdrs = [],
+)
+EOF
+
   ;;
 darwin)
+  rm -f fromhost/*.[ah]
+  touch fromhost/empty.c
+
   homebrew_header=$(ls -1 $(brew --prefix 2>/dev/null)/Cellar/libarchive/*/include/archive.h 2>/dev/null | head -n1)
   if [[ -e $homebrew_header ]]; then
     # For use with Homebrew.
     archive_dir=$(dirname $(dirname $homebrew_header))
     ARCHIVE_CFLAGS="-I${archive_dir}/include"
     LDFLAGS="-L${archive_dir}/lib -larchive $LDFLAGS"
+
+    cp ${archive_dir}/lib/*.a ${archive_dir}/include/*.h fromhost/
+    cat << EOF >> fromhost/BUILD
+cc_library(
+  name = "libarchive",
+  srcs = glob(["*.a"]) + ["empty.c"],
+  hdrs = glob(["*.h"]),
+  includes  = ["."],
+  linkopts = ["-lxml2", "-liconv", "-lbz2", "-lz", ],
+)
+EOF
+
   elif [[ -e /opt/local/include/archive.h ]]; then
     # For use with Macports.
-    ARCHIVE_CFLAGS="-I/opt/local/include"
+    cp /opt/local/include/archive.h  /opt/local/include/archive_entry.h fromhost/
+    cp /opt/local/lib/{libarchive,liblzo2,liblzma,libcharset,libbz2,libxml2,libz,libiconv}.a \
+      fromhost/
+
+    ARCHIVE_CFLAGS="-Ifromhost"
     # Link libarchive statically
-    LDFLAGS="/opt/local/lib/libarchive.a /opt/local/lib/liblzo2.a \
-             /opt/local/lib/liblzma.a /opt/local/lib/libcharset.a \
-             /opt/local/lib/libbz2.a /opt/local/lib/libxml2.a \
-             /opt/local/lib/libz.a /opt/local/lib/libiconv.a \
+    LDFLAGS="fromhost/libarchive.a fromhost/liblzo2.a \
+             fromhost/liblzma.a fromhost/libcharset.a \
+             fromhost/libbz2.a fromhost/libxml2.a \
+             fromhost/libz.a fromhost/libiconv.a \
              $LDFLAGS"
+    cat << EOF >> fromhost/BUILD
+cc_library(
+  name = "libarchive",
+  srcs = glob(["*.a"]) + ["empty.c"],
+  hdrs = glob(["*.h"]),
+  includes  = ["."],
+)
+EOF
   else
     log "WARNING: Could not find libarchive installation, proceeding bravely."
   fi
 
   JNILIB="libunix.dylib"
   MD5SUM="md5"
-  JAVA_HOME=${JAVA_HOME:-$(/usr/libexec/java_home -v 1.7+)}
-  PROTOC=${PROTOC:-protoc}
+  if [[ -z "$JAVA_HOME" ]]; then
+    JAVA_HOME=$(/usr/libexec/java_home -v 1.8+ 2> /dev/null) \
+      || fail "Could not find JAVA_HOME, please ensure a JDK (version 1.8+) is installed."
+  fi
+  PROTOC=${PROTOC:-third_party/protobuf/protoc.darwin}
   ;;
+
 msys*|mingw*)
   # Use a simplified platform string.
   PLATFORM="mingw"
@@ -126,14 +174,17 @@ msys*|mingw*)
   done
 esac
 
-test -z "$JAVA_HOME" && fail "JDK not found, please set $$JAVA_HOME."
+test -z "$JAVA_HOME" && fail "JDK not found, please set \$JAVA_HOME."
+rm -f tools/jdk/jdk && ln -s "${JAVA_HOME}" tools/jdk/jdk
+
 
 JAVAC="${JAVA_HOME}/bin/javac"
-JAR="${JAVA_HOME}/bin/jar"
 
-CLASSPATH=${LIBRARY_JARS// /$PATHSEP}
-CLASSPATH_TESTS=${TEST_LIBRARY_JARS// /$PATHSEP}
-SOURCEPATH=${JAVA_SRCDIRS// /$PATHSEP}
+JAVAC_VERSION=$($JAVAC -version 2>&1)
+[[ "$JAVAC_VERSION" =~ ^"javac 1"\.([89]|[1-9][0-9]).*$ ]] \
+    || fail "JDK version is lower than 1.8, please set \$JAVA_HOME."
+
+JAR="${JAVA_HOME}/bin/jar"
 
 BLAZE_CC_FILES=(
 src/main/cpp/blaze_startup_options.cc
@@ -157,58 +208,163 @@ src/main/native/unix_jni.cc
 src/main/native/unix_jni_${PLATFORM}.cc
 )
 
+IJAR_CC_FILES=(
+third_party/ijar/ijar.cc
+third_party/ijar/zip.cc
+third_party/ijar/classfile.cc
+)
+
+# Compiles java classes.
+function java_compilation() {
+  name=$1
+  directories=$2
+  library_jars=$3
+  output=$4
+
+  classpath=${library_jars// /$PATHSEP}:$5
+  sourcepath=${directories// /$PATHSEP}
+
+  tmp="$(mktemp -d ${TMPDIR:-/tmp}/bazel.XXXXXXXX)"
+  paramfile="${tmp}/param"
+  errfile="${tmp}/err"
+
+  mkdir -p "${output}/classes"
+
+  trap "cat \"$errfile\"; rm -f \"$paramfile\" \"$errfile\"; rmdir \"$tmp\"" EXIT
+
+  # Compile .java files (incl. generated ones) using javac
+  log "Compiling $name code..."
+  find ${directories} -name "*.java" > "$paramfile"
+
+  if [ ! -z "$BAZEL_DEBUG_JAVA_COMPILATION" ]; then
+    echo "directories=${directories}" >&2
+    echo "classpath=${classpath}" >&2
+    echo "sourcepath=${sourcepath}" >&2
+    echo "libraries=${library_jars}" >&2
+    echo "output=${output}/classes" >&2
+    echo "List of compiled files:" >&2
+    cat "$paramfile" >&2
+  fi
+
+  "${JAVAC}" -classpath "${classpath}" -sourcepath "${sourcepath}" \
+      -d "${output}/classes" "@${paramfile}" &> "$errfile" ||
+      exit $?
+  trap - EXIT
+  rm "$paramfile" "$errfile"
+  rmdir "$tmp"
+
+  log "Extracting helper classes for $name..."
+  for f in ${library_jars} ; do
+    unzip -qn ${f} -d "${output}/classes"
+  done
+}
+
+# Create the deploy JAR
+function create_deploy_jar() {
+  name=$1
+  mainClass=$2
+  output=$3
+  shift 3
+  packages=""
+  for i in $output/classes/*; do
+    package=$(basename $i)
+    if [[ "$package" != "META-INF" ]]; then
+      packages="$packages -C $output/classes $package"
+    fi
+  done
+
+  log "Creating $name.jar..."
+  echo "Main-Class: $mainClass" > $output/MANIFEST.MF
+  "$JAR" cmf $output/MANIFEST.MF $output/$name.jar $packages "$@"
+}
+
 if [ -z "${BAZEL_SKIP_JAVA_COMPILATION}" ]; then
   log "Compiling Java stubs for protocol buffers..."
   for f in $PROTO_FILES ; do
     "${PROTOC}" -Isrc/main/protobuf/ --java_out=output/src "$f"
   done
 
-  tmp="$(mktemp -d /tmp/bazel.XXXXXXXX)"
-  paramfile="${tmp}.param"
-  errfile="${tmp}.err"
+  java_compilation "Bazel Java" "$DIRS" "$LIBRARY_JARS" "output"
 
-  # Compile .java files (incl. generated ones) using javac
-  log "Compiling Bazel Java code..."
-  find ${DIRS} -name "*.java" > "$paramfile"
-  "${JAVAC}" -classpath "${CLASSPATH}" -sourcepath "$SOURCEPATH" \
-      -d "output/classes" "@${paramfile}" &> "$errfile" ||
-      { cat "$errfile" ; rm -f "$paramfile" "$errfile" ; exit 1 ; }
-  rm "$paramfile" "$errfile"
-
-  log "Extracting helper classes..."
-  for f in $LIBRARY_JARS ; do
-    unzip -qn ${f} -d output/classes
+  # help files: all non java files in src/main/java.
+  for i in $(find src/main/java -type f -a \! -name '*.java' | sed 's|src/main/java/||'); do
+    mkdir -p $(dirname output/classes/$i)
+    cp src/main/java/$i output/classes/$i
   done
 
-  # help files.
-  cp src/main/java/com/google/devtools/build/lib/blaze/commands/*.txt \
-      output/classes/com/google/devtools/build/lib/blaze/commands/
-
-  log "Creating libblaze.jar..."
-  echo "Main-Class: com.google.devtools.build.lib.bazel.BazelMain" > output/MANIFEST.MF
-  "$JAR" cmf output/MANIFEST.MF output/libblaze.jar \
-      -C output/classes com/ -C output/classes javax/ -C output/classes org/
+  create_deploy_jar "libblaze" "com.google.devtools.build.lib.bazel.BazelMain" \
+      output third_party/javascript
 fi
 
-log "Compiling client .cc files..."
-for FILE in "${BLAZE_CC_FILES[@]}"; do
-  if [[ ! "${FILE}" =~ ^-.*$ ]]; then
-    OUT=$(basename "${FILE}").o
-    "${CPP}" \
-        -I src/main/cpp/ \
-        ${ARCHIVE_CFLAGS} \
-        ${CFLAGS} \
-        -std=$CPPSTD \
-        -c \
-        -DBLAZE_JAVA_CPU=\"k8\" \
-        -DBLAZE_OPENSOURCE=1 \
-        -o "output/objs/${OUT}" \
-        "${FILE}"
-  fi
-done
+if [ -z "${BAZEL_SKIP_SINGLEJAR_COMPILATION}" ]; then
+  # Compile singlejar, a jar suitable for deployment.
+  java_compilation "SingleJar tool" "$SINGLEJAR_DIRS" "$SINGLEJAR_LIBRARIES" \
+    "output/singlejar"
 
-log "Linking client..."
-"${CPP}" -o output/client output/objs/*.o -lstdc++ ${LDFLAGS}
+  create_deploy_jar "SingleJar_deploy" \
+      "com.google.devtools.build.singlejar.SingleJar" "output/singlejar"
+  mkdir -p tools/java
+  cp -f output/singlejar/SingleJar_deploy.jar tools/java
+fi
+
+if [ -z "${BAZEL_SKIP_BUILDJAR_COMPILATION}" ]; then
+  # Compile buildjar, a wrapper around javac.
+  java_compilation "JavaBuilder tool" "$BUILDJAR_DIRS" "$BUILDJAR_LIBRARIES" \
+      "output/buildjar" $JAVA_HOME/lib/tools.jar
+
+  create_deploy_jar "JavaBuilder_deploy" \
+      "com.google.devtools.build.buildjar.BazelJavaBuilder" "output/buildjar"
+  mkdir -p tools/java
+  cp -f output/buildjar/JavaBuilder_deploy.jar tools/java
+fi
+
+function cc_compile() {
+  local OBJDIR=$1
+  shift
+  mkdir -p "output/${OBJDIR}"
+  for FILE in "$@"; do
+    if [[ ! "${FILE}" =~ ^-.*$ ]]; then
+      local OBJ=$(basename "${FILE}").o
+      "${CPP}" \
+         -I src/main/cpp/ \
+          ${ARCHIVE_CFLAGS} \
+          ${CFLAGS} \
+          -std=$CPPSTD \
+          -c \
+          -DBLAZE_JAVA_CPU=\"k8\" \
+          -DBLAZE_OPENSOURCE=1 \
+          -o "output/${OBJDIR}/${OBJ}" \
+          "${FILE}"
+    fi
+  done
+}
+
+function cc_link() {
+  local OBJDIR=$1
+  local OUTPUT=$2
+  shift 2
+  local FILES=()
+  for FILE in "$@"; do
+    local OBJ=$(basename "${FILE}").o
+    FILES+=("output/${OBJDIR}/${OBJ}")
+  done
+  "${CPP}" -o ${OUTPUT} "${FILES[@]}" -lstdc++ ${LDFLAGS}
+}
+
+function cc_build() {
+  local NAME=$1
+  local OBJDIR=$2
+  local OUTPUT=$3
+  shift 3
+  log "Compiling ${NAME} .cc files..."
+  cc_compile "${OBJDIR}" "$@"
+  log "Linking ${NAME}..."
+  cc_link "${OBJDIR}" "${OUTPUT}" "$@"
+}
+
+cc_build "client" "objs" "output/client" ${BLAZE_CC_FILES[@]}
+
+LDFLAGS="$LDFLAGS -lz" cc_build "ijar" "ijar" "tools/java/ijar" ${IJAR_CC_FILES[@]}
 
 if [ ! -z "$JNILIB" ] ; then
   log "Compiling JNI libraries..."
@@ -248,6 +404,7 @@ chmod 755 output/client_info
 log "Creating Bazel self-extracting archive..."
 TO_ZIP="libblaze.jar ${JNILIB} build-runfiles${EXE_EXT} process-wrapper${EXE_EXT} client_info build_interface_so ${MSYS_DLLS}"
 (cd output/ ; cat client ${TO_ZIP} | ${MD5SUM} | awk '{ print $1; }' > install_base_key)
+(cd output/ ; find . -type f | xargs -P 10 touch -t 198001010000)
 (cd output/ ; zip $ZIPOPTS -q package.zip ${TO_ZIP} install_base_key)
 cat output/client output/package.zip > output/bazel
 zip -qA output/bazel \

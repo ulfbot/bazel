@@ -16,8 +16,8 @@ package com.google.devtools.build.lib.rules.objc;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.view.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.view.RuleContext;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleContext;
 
 import java.util.Locale;
 
@@ -25,7 +25,7 @@ import java.util.Locale;
  * Attributes containing one or more labels.
  */
 public enum ArtifactListAttribute {
-  ARCHIVES, BUNDLE_IMPORTS;
+  BUNDLE_IMPORTS;
 
   public String attrName() {
     return name().toLowerCase(Locale.US);
@@ -39,7 +39,7 @@ public enum ArtifactListAttribute {
     if (context.attributes().getAttributeDefinition(attrName()) == null) {
       return ImmutableList.of();
     } else {
-      return context.getPrerequisiteArtifacts(attrName(), Mode.TARGET);
+      return context.getPrerequisiteArtifacts(attrName(), Mode.TARGET).list();
     }
   }
 }

@@ -16,7 +16,9 @@ package com.google.devtools.build.lib.actions;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
+import com.google.common.base.Functions;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Collections2;
 import com.google.common.collect.Iterables;
 
 import java.util.ArrayList;
@@ -49,7 +51,7 @@ public final class ActionInputHelper {
         // contains a middleman.
         if (middlemanAction.getActionType() == Action.MiddlemanType.AGGREGATING_MIDDLEMAN) {
           Artifact.addNonMiddlemanArtifacts(middlemanAction.getInputs(), output,
-              Artifact.IDENTITY_FORMATTER);
+              Functions.<Artifact>identity());
         }
 
       }
@@ -90,6 +92,11 @@ public final class ActionInputHelper {
       }
       return this.path.equals(((BasicActionInput) other).path);
     }
+
+    @Override
+    public String toString() {
+      return "BasicActionInput: " + path;
+    }
   }
 
   /**
@@ -113,8 +120,8 @@ public final class ActionInputHelper {
   /**
    * Creates a sequence of {@link ActionInput}s from a sequence of string paths.
    */
-  public static Iterable<ActionInput> fromPaths(Iterable<String> paths) {
-    return Iterables.transform(paths, FROM_PATH);
+  public static Collection<ActionInput> fromPaths(Collection<String> paths) {
+    return Collections2.transform(paths, FROM_PATH);
   }
 
   /**

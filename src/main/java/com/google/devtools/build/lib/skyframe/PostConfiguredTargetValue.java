@@ -15,7 +15,7 @@ package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.view.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 
@@ -31,15 +31,15 @@ class PostConfiguredTargetValue implements SkyValue {
     this.ct = Preconditions.checkNotNull(ct);
   }
 
-  public static ImmutableList<SkyKey> keys(Iterable<LabelAndConfiguration> lacs) {
+  public static ImmutableList<SkyKey> keys(Iterable<ConfiguredTargetKey> lacs) {
     ImmutableList.Builder<SkyKey> keys = ImmutableList.builder();
-    for (LabelAndConfiguration lac : lacs) {
+    for (ConfiguredTargetKey lac : lacs) {
       keys.add(key(lac));
     }
     return keys.build();
   }
 
-  public static SkyKey key(LabelAndConfiguration lac) {
+  public static SkyKey key(ConfiguredTargetKey lac) {
     return new SkyKey(SkyFunctions.POST_CONFIGURED_TARGET, lac);
   }
 

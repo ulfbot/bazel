@@ -352,13 +352,23 @@ class Parser {
   private Expression makeFuncallExpression(Expression receiver, Ident function,
                                            List<Argument> args,
                                            int start, int end) {
+    if (function.getLocation() == null) {
+      function = setLocation(function, start, end);
+    }
     boolean seenKeywordArg = false;
+    boolean seenKwargs = false;
     for (Argument arg : args) {
       if (arg.isPositional()) {
-        if (seenKeywordArg) {
+        if (seenKeywordArg || seenKwargs) {
           reportError(arg.getLocation(), "syntax error: non-keyword arg after keyword arg");
           return makeErrorExpression(start, end);
         }
+      } else if (arg.isKwargs()) {
+        if (seenKwargs) {
+          reportError(arg.getLocation(), "there can be only one **kwargs argument");
+          return makeErrorExpression(start, end);
+        }
+        seenKwargs = true;
       } else {
         seenKeywordArg = true;
       }
@@ -383,6 +393,13 @@ class Parser {
       } else { // oops, back up!
         pushToken(identToken);
       }
+    }
+    // parse **expr
+    if (token.kind == TokenKind.STAR) {
+      expect(TokenKind.STAR);
+      expect(TokenKind.STAR);
+      Expression expr = parseExpression();
+      return setLocation(new Argument(null, expr, true), start, expr);
     }
     // parse a positional argument
     Expression expr = parseExpression();
@@ -968,7 +985,7 @@ class Parser {
       Token identToken = token;
       Ident ident = parseIdent();
 
-      if (ident.getName().equals("include") && token.kind == TokenKind.LPAREN) {
+      if (ident.getName().equals("include") && token.kind == TokenKind.LPAREN && !skylarkMode) {
         expect(TokenKind.LPAREN);
         if (token.kind == TokenKind.STRING) {
           include((String) token.value, list, lexer.createLocation(start, token.right));
@@ -983,7 +1000,7 @@ class Parser {
       }
       pushToken(identToken); // push the ident back to parse it as a statement
     }
-    parseStatement(list);
+    parseStatement(list, true);
   }
 
   // simple_stmt ::= small_stmt (';' small_stmt)* ';'? NEWLINE
@@ -1154,7 +1171,7 @@ class Parser {
       }
       expect(TokenKind.INDENT);
       while (token.kind != TokenKind.OUTDENT && token.kind != TokenKind.EOF) {
-        parseStatement(list);
+        parseStatement(list, false);
       }
       expect(TokenKind.OUTDENT);
     } else {
@@ -1201,12 +1218,20 @@ class Parser {
 
   // stmt ::= simple_stmt
   //        | compound_stmt
-  private void parseStatement(List<Statement> list) {
+  private void parseStatement(List<Statement> list, boolean isTopLevel) {
     if (token.kind == TokenKind.DEF && skylarkMode) {
+      if (!isTopLevel) {
+        reportError(lexer.createLocation(token.left, token.right),
+            "nested functions are not allowed. Move the function to top-level");
+      }
       parseFunctionDefStatement(list);
     } else if (token.kind == TokenKind.IF && skylarkMode) {
       parseIfStatement(list);
     } else if (token.kind == TokenKind.FOR && skylarkMode) {
+      if (isTopLevel) {
+        reportError(lexer.createLocation(token.left, token.right),
+            "for loops are not allowed on top-level. Put it into a function");
+      }
       parseForStatement(list);
     } else if (token.kind == TokenKind.IF
         || token.kind == TokenKind.ELSE

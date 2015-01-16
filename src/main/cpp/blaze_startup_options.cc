@@ -45,16 +45,15 @@ BlazeStartupOptions::BlazeStartupOptions(const BlazeStartupOptions &rhs)
       host_jvm_debug(rhs.host_jvm_debug),
       host_jvm_profile(rhs.host_jvm_profile),
       host_jvm_args(rhs.host_jvm_args),
-      use_blaze64(rhs.use_blaze64),
       batch(rhs.batch),
       batch_cpu_scheduling(rhs.batch_cpu_scheduling),
       io_nice_level(rhs.io_nice_level),
       max_idle_secs(rhs.max_idle_secs),
       skyframe(rhs.skyframe),
-      skygraph(rhs.skygraph),
       watchfs(rhs.watchfs),
       allow_configurable_attributes(rhs.allow_configurable_attributes),
       option_sources(rhs.option_sources),
+      webstatus_port(rhs.webstatus_port),
       host_javabase(rhs.host_javabase) {}
 
 BlazeStartupOptions::~BlazeStartupOptions() {
@@ -95,14 +94,16 @@ string BlazeStartupOptions::GetWorkspace(const string &cwd) {
   return "";
 }
 
-bool BlazeStartupOptions::ProcessArgExtra(
+blaze_exit_code::ExitCode BlazeStartupOptions::ProcessArgExtra(
     const char *arg, const char *next_arg, const string &rcfile,
-    const char **value) {
-  return false;
+    const char **value, bool *is_processed, string *error) {
+  *is_processed = false;
+  return blaze_exit_code::SUCCESS;
 }
 
-void BlazeStartupOptions::CheckForReExecuteOptions(
-    int argc, const char *argv[]) {
+blaze_exit_code::ExitCode BlazeStartupOptions::CheckForReExecuteOptions(
+      int argc, const char *argv[], string *error) {
+  return blaze_exit_code::SUCCESS;
 }
 
 string BlazeStartupOptions::GetDefaultHostJavabase() const {
@@ -111,19 +112,28 @@ string BlazeStartupOptions::GetDefaultHostJavabase() const {
 
 string BlazeStartupOptions::GetJvm() {
   string java_program = GetHostJavabase() + "/bin/java";
-  string rt_jar = GetHostJavabase() + "/jre/lib/rt.jar";
-  if (access(rt_jar.c_str(), R_OK) == -1 ||
-      access(java_program.c_str(), X_OK) == -1) {
+  if (access(java_program.c_str(), X_OK) == -1) {
     if (errno == ENOENT) {
-      fprintf(stderr, "Couldn't find JDK at '%s'.\n",
-              GetHostJavabase().c_str());
+      fprintf(stderr, "Couldn't find java at '%s'.\n", java_program.c_str());
     } else {
-      fprintf(stderr, "Couldn't access %s: %s\n", GetHostJavabase().c_str(),
-              strerror(errno));
+      fprintf(stderr, "Couldn't access %s: %s\n", java_program.c_str(),
+          strerror(errno));
     }
     exit(1);
   }
-  return java_program;
+  for (string rt_jar : {
+      // If the full JDK is installed
+      GetHostJavabase() + "/jre/lib/rt.jar",
+      // If just the JRE is installed
+      GetHostJavabase() + "/lib/rt.jar"
+  }) {
+    if (access(rt_jar.c_str(), R_OK) == 0) {
+      return java_program;
+    }
+  }
+  fprintf(stderr, "Problem with java installation: "
+      "couldn't find/access rt.jar in %s\n", GetHostJavabase().c_str());
+  exit(1);
 }
 
 BlazeStartupOptions::Architecture BlazeStartupOptions::GetBlazeArchitecture()
@@ -131,10 +141,11 @@ BlazeStartupOptions::Architecture BlazeStartupOptions::GetBlazeArchitecture()
   return strcmp(BLAZE_JAVA_CPU, "64") == 0 ? k64Bit : k32Bit;
 }
 
-void BlazeStartupOptions::AddJVMArguments(const string &host_javabase,
-                                          vector<string> *result) const {
+blaze_exit_code::ExitCode BlazeStartupOptions::AddJVMArguments(
+    const string &host_javabase, vector<string> *result, string *error) const {
   // TODO(bazel-team): see what tuning options make sense in the
   // open-source world.
+  return blaze_exit_code::SUCCESS;
 }
 
 string BlazeStartupOptions::RcBasename() {

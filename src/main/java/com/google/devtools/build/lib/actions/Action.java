@@ -16,7 +16,6 @@ package com.google.devtools.build.lib.actions;
 
 import com.google.devtools.build.lib.actions.extra.ExtraActionInfo;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ConditionallyThreadCompatible;
-import com.google.devtools.build.lib.pkgcache.PackageUpToDateChecker;
 import com.google.devtools.build.lib.profiler.Describable;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
@@ -35,14 +34,14 @@ public interface Action extends ActionMetadata, Describable {
   /**
    * Prepares for executing this action; called by the Builder prior to
    * executing the Action itself. This method should prepare the file system, so
-   * that the execution of the Action can write the output files. At the minimum
+   * that the execution of the Action can write the output files. At a minimum
    * any pre-existing and write protected output files should be removed or the
    * permissions should be changed, so that they can be safely overwritten by
    * the action.
    *
-   * @throws IOException
+   * @throws IOException if there is an error deleting the outputs.
    */
-  void prepare(ActionExecutionContext actionExecutionContext) throws IOException;
+  void prepare() throws IOException;
 
   /**
    * Executes this action; called by the Builder when all of this Action's
@@ -88,7 +87,7 @@ public interface Action extends ActionMetadata, Describable {
    * definition of this method, so be sure to consider both methods together
    * when making changes.
    */
-  boolean executeUnconditionally(PackageUpToDateChecker upToDateChecker);
+  boolean executeUnconditionally();
 
   /**
    * Returns true if it's ever possible that {@link #executeUnconditionally}
@@ -96,6 +95,13 @@ public interface Action extends ActionMetadata, Describable {
    * otherwise.
    */
   boolean isVolatile();
+
+  /**
+   * Method used to find inputs before execution for an action that
+   * {@link ActionMetadata#discoversInputs}.
+   */
+  public void discoverInputs(ActionExecutionContext actionExecutionContext)
+      throws ActionExecutionException, InterruptedException;
 
   /**
    * Method used to update action inputs based on the information contained in
@@ -147,15 +153,13 @@ public interface Action extends ActionMetadata, Describable {
   boolean showsOutputUnconditionally();
 
   /**
-   * Called by {@link com.google.devtools.build.lib.view.extra.ExtraAction} at execution time to
+   * Called by {@link com.google.devtools.build.lib.rules.extra.ExtraAction} at execution time to
    * extract information from this action into a protocol buffer to be used by extra_action rules.
    *
    * <p>As this method is called from the ExtraAction, make sure it is ok to call this method from
    * a different thread than the one this action is executed on.
    */
   ExtraActionInfo.Builder getExtraActionInfo();
-
-  boolean shouldCreateExtraAction();
 
   /**
    * Returns the action type. Must not be {@code null}.
@@ -174,17 +178,6 @@ public interface Action extends ActionMetadata, Describable {
     AGGREGATING_MIDDLEMAN,
 
     /**
-     * A scheduling middleman, which is not validated by the dependency checker, but used to enforce
-     * action ordering.
-     */
-    SCHEDULING_MIDDLEMAN,
-
-    /**
-     * A scheduling middleman used for target completion. These are handled specially in some cases.
-     */
-    TARGET_COMPLETION_MIDDLEMAN,
-
-    /**
      * A middleman that enforces action ordering, is not validated by the dependency checker, but
      * allows errors to be propagated.
      */
@@ -199,10 +192,6 @@ public interface Action extends ActionMetadata, Describable {
 
     public boolean isMiddleman() {
       return this != NORMAL;
-    }
-
-    public boolean isSchedulingMiddleman() {
-      return (this == SCHEDULING_MIDDLEMAN) || (this == TARGET_COMPLETION_MIDDLEMAN);
     }
   }
 }

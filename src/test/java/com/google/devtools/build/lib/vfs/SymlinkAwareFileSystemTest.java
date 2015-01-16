@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.vfs;
 
+import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -42,6 +43,7 @@ public abstract class SymlinkAwareFileSystemTest extends FileSystemTest {
   protected Path xLinkToDirectory;
   protected Path xDanglingLink;
 
+  @Override
   @Before
   public void setUp() throws Exception {
     super.setUp();
@@ -92,8 +94,8 @@ public abstract class SymlinkAwareFileSystemTest extends FileSystemTest {
     }
     assertEquals(2,
                  linkPath.getParentDirectory().getDirectoryEntries().size());
-    MoreAsserts.assertContentsAnyOrder(linkPath.getParentDirectory().getDirectoryEntries(),
-                                       newPath, linkPath);
+    assertThat(linkPath.getParentDirectory().getDirectoryEntries()).containsExactly(newPath,
+        linkPath);
   }
 
   @Test
@@ -110,8 +112,8 @@ public abstract class SymlinkAwareFileSystemTest extends FileSystemTest {
     assertTrue(linkPath.isDirectory());
     assertEquals(2,
                  linkPath.getParentDirectory().getDirectoryEntries().size());
-    MoreAsserts.assertContentsAnyOrder(linkPath.getParentDirectory().
-      getDirectoryEntries(), newPath, linkPath);
+    assertThat(linkPath.getParentDirectory().
+      getDirectoryEntries()).containsExactly(newPath, linkPath);
   }
 
   @Test
@@ -225,11 +227,12 @@ public abstract class SymlinkAwareFileSystemTest extends FileSystemTest {
       fail();
     } catch (FileNotFoundException e) { /* ok */ }
 
-    Path etc = testFS.getPath("/etc");
-    if (!etc.isDirectory()) {
-      etc.createDirectory();
+    // The path may not be a symlink, neither on Darwin nor on Linux.
+    Path rootChild = testFS.getPath("/sbin");
+    if (!rootChild.isDirectory()) {
+      rootChild.createDirectory();
     }
-    assertEquals(etc, linkPath.getRelative("etc").resolveSymbolicLinks());
+    assertEquals(rootChild, linkPath.getRelative("sbin").resolveSymbolicLinks());
   }
 
   @Test
@@ -471,8 +474,7 @@ public abstract class SymlinkAwareFileSystemTest extends FileSystemTest {
     assertTrue(someLink.delete());
     assertEquals(xEmptyDirectory.getDirectoryEntries().size(), 1);
 
-    MoreAsserts.assertContentsAnyOrder(xEmptyDirectory.getDirectoryEntries(),
-                                       newPath);
+    assertThat(xEmptyDirectory.getDirectoryEntries()).containsExactly(newPath);
   }
 
   // Testing the links
@@ -494,8 +496,8 @@ public abstract class SymlinkAwareFileSystemTest extends FileSystemTest {
     Path resultPath1 = absolutize("link/new-file-1");
     Path resultPath2 = absolutize("link/new-file-2");
     Path resultPath3 = absolutize("link/new-file-3");
-    MoreAsserts.assertContentsAnyOrder(linkPath.getDirectoryEntries(),
-      resultPath1, resultPath2, resultPath3);
+    assertThat(linkPath.getDirectoryEntries()).containsExactly(resultPath1, resultPath2,
+        resultPath3);
   }
 
   @Test
@@ -606,7 +608,7 @@ public abstract class SymlinkAwareFileSystemTest extends FileSystemTest {
     Path fooAlias = xNothing.getChild("foo");
     createSymbolicLink(xNothing, xNonEmptyDirectory);
     Collection<Path> dirents = xNothing.getDirectoryEntries();
-    MoreAsserts.assertContentsAnyOrder(dirents, fooAlias);
+    assertThat(dirents).containsExactly(fooAlias);
   }
 
   @Test

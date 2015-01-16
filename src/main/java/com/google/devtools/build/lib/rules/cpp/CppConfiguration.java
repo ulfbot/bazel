@@ -26,7 +26,14 @@ import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.devtools.build.lib.actions.ArtifactFactory;
+import com.google.devtools.build.lib.actions.PackageRootResolver;
 import com.google.devtools.build.lib.actions.Root;
+import com.google.devtools.build.lib.analysis.ViewCreationFailedException;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.BuildOptions;
+import com.google.devtools.build.lib.analysis.config.CompilationMode;
+import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
+import com.google.devtools.build.lib.analysis.config.PerLabelOptions;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
@@ -40,12 +47,6 @@ import com.google.devtools.build.lib.util.IncludeScanningUtil;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.ViewCreationFailedException;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
-import com.google.devtools.build.lib.view.config.BuildOptions;
-import com.google.devtools.build.lib.view.config.CompilationMode;
-import com.google.devtools.build.lib.view.config.InvalidConfigurationException;
-import com.google.devtools.build.lib.view.config.PerLabelOptions;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.LinkingModeFlags;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.LipoMode;
@@ -55,9 +56,9 @@ import com.google.devtools.common.options.OptionsParsingException;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -397,7 +398,7 @@ public class CppConfiguration extends BuildConfiguration.Fragment {
     this.solibDirectory = "_solib_" + targetCpu;
 
     this.toolchainIdentifier = toolchain.getToolchainIdentifier();
-    this.cacheKey = toString() + ":" + crosstoolTop + ":" + params.cacheKeySuffix + ":"
+    this.cacheKey = this + ":" + crosstoolTop + ":" + params.cacheKeySuffix + ":"
         + lipoContextCollector;
 
     this.supportsGoldLinker = toolchain.getSupportsGoldLinker();
@@ -427,7 +428,7 @@ public class CppConfiguration extends BuildConfiguration.Fragment {
             crosstoolTopPathFragment.getRelative(tool.getNamePart()));
       }
     } else {
-      Iterable<Tool> neededTools = Iterables.filter(Arrays.asList(Tool.values()),
+      Iterable<Tool> neededTools = Iterables.filter(EnumSet.allOf(Tool.class),
           new Predicate<Tool>() {
             @Override
             public boolean apply(Tool tool) {
@@ -1506,10 +1507,10 @@ public class CppConfiguration extends BuildConfiguration.Fragment {
    * Returns the architecture component of the GNU System Name
    */
   public String getGnuSystemArch() {
-    if (targetSystemName.indexOf("-") == -1) {
+    if (targetSystemName.indexOf('-') == -1) {
       return targetSystemName;
     }
-    return targetSystemName.substring(0, targetSystemName.indexOf("-"));
+    return targetSystemName.substring(0, targetSystemName.indexOf('-'));
   }
 
   /**
@@ -1621,10 +1622,10 @@ public class CppConfiguration extends BuildConfiguration.Fragment {
   }
 
   @Override
-  public void prepareHook(Path execRoot, ArtifactFactory artifactFactory, PathFragment genfilesPath)
-      throws ViewCreationFailedException {
+  public void prepareHook(Path execRoot, ArtifactFactory artifactFactory, PathFragment genfilesPath,
+      PackageRootResolver resolver) throws ViewCreationFailedException {
     try {
-      getFdoSupport().prepareToBuild(execRoot, genfilesPath, artifactFactory);
+      getFdoSupport().prepareToBuild(execRoot, genfilesPath, artifactFactory, resolver);
     } catch (ZipException e) {
       throw new ViewCreationFailedException("Error reading provided FDO zip file", e);
     } catch (FdoException | IOException e) {

@@ -31,7 +31,7 @@ import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.AttributeMap.AcceptsLabelAttribute;
 import com.google.devtools.build.lib.packages.License.DistributionType;
 import com.google.devtools.build.lib.packages.PackageDeserializer.PackageDeserializationException;
-import com.google.devtools.build.lib.syntax.BuildFileAST;
+import com.google.devtools.build.lib.packages.PackageFactory.Globber;
 import com.google.devtools.build.lib.syntax.FuncallExpression;
 import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.syntax.Label.SyntaxException;
@@ -75,6 +75,11 @@ public class Package implements Serializable {
   }
 
   /**
+   * The repository identifier for this package.
+   */
+  private final PackageIdentifier packageIdentifier;
+
+  /**
    * The name of the package, e.g. "foo/bar".
    */
   protected final String name;
@@ -83,12 +88,6 @@ public class Package implements Serializable {
    * Like name, but in the form of a PathFragment.
    */
   private final PathFragment nameFragment;
-
-  /**
-   * The (optional) abstract syntax tree of the build file that created this
-   * package.
-   */
-  private BuildFileAST ast;
 
   /**
    * The filename of this package's BUILD file.
@@ -149,7 +148,7 @@ public class Package implements Serializable {
    * Default copts for cc_* rules.  The rules' individual copts will append to
    * this value.
    */
-  private List<String> defaultCopts;
+  private ImmutableList<String> defaultCopts;
 
   /**
    * The InputFile target corresponding to this package's BUILD file.
@@ -181,6 +180,11 @@ public class Package implements Serializable {
   private Map<Label, Path> subincludes;
 
   /**
+   * The list of transitive closure of the Skylark file dependencies.
+   */
+  private ImmutableList<Label> skylarkFileDependencies;
+
+  /**
    * The package's default "licenses" and "distribs" attributes, as specified
    * in calls to licenses() and distribs() in the BUILD file.
    */
@@ -209,9 +213,10 @@ public class Package implements Serializable {
    * @precondition {@code name} must be a suffix of
    * {@code filename.getParentDirectory())}.
    */
-  protected Package(String name) {
-    this.name = name;
-    this.nameFragment = Canonicalizer.fragments().intern(new PathFragment(name));
+  protected Package(PackageIdentifier packageId) {
+    this.packageIdentifier = packageId;
+    this.nameFragment = Canonicalizer.fragments().intern(packageId.getPackageFragment());
+    this.name = nameFragment.getPathString();
   }
 
   private void writeObject(ObjectOutputStream out) {
@@ -249,7 +254,7 @@ public class Package implements Serializable {
 
   /** Returns this packages' identifier. */
   public PackageIdentifier getPackageIdentifier() {
-    return getBuildFileLabel().getPackageIdentifier();
+    return packageIdentifier;
   }
 
   /**
@@ -311,7 +316,6 @@ public class Package implements Serializable {
         rule.setContainsErrors();
       }
     }
-    this.ast = builder.ast;
     this.filename = builder.filename;
     this.packageDirectory = filename.getParentDirectory();
 
@@ -336,6 +340,7 @@ public class Package implements Serializable {
     this.containsErrors = builder.containsErrors;
     this.containsTemporaryErrors = builder.containsTemporaryErrors;
     this.subincludes = builder.subincludes;
+    this.skylarkFileDependencies = builder.skylarkFileDependencies;
     this.defaultLicense = builder.defaultLicense;
     this.defaultDistributionSet = builder.defaultDistributionSet;
     this.features = ImmutableSortedSet.copyOf(builder.features);
@@ -349,6 +354,13 @@ public class Package implements Serializable {
    */
   public Map<Label, Path> getSubincludes() {
     return subincludes;
+  }
+
+  /**
+   * Returns the list of transitive closure of the Skylark file dependencies of this package.
+   */
+  public ImmutableList<Label> getSkylarkFileDependencies() {
+    return skylarkFileDependencies;
   }
 
   /**
@@ -377,7 +389,8 @@ public class Package implements Serializable {
   }
 
   /**
-   * Returns the name of this package.
+   * Returns the name of this package. If this build is using external repositories then this name
+   * may not be unique!
    */
   public String getName() {
     return name;
@@ -506,14 +519,6 @@ public class Package implements Serializable {
   }
 
   /**
-   * Returns the AST for this package. Returns null if retainAST was true when
-   * evaluateBuildFile was called for this package.
-   */
-  public BuildFileAST getSyntaxTree() {
-    return ast;
-  }
-
-  /**
    * Returns the features specified in the <code>package()</code> declaration.
    */
   public ImmutableSet<String> getFeatures() {
@@ -573,7 +578,7 @@ public class Package implements Serializable {
    * @throws SyntaxException if the {@code targetName} is invalid
    */
   public Label createLabel(String targetName) throws SyntaxException {
-    return buildFile.getLabel().getLocalTargetLabel(targetName);
+    return Label.create(packageIdentifier, targetName);
   }
 
   /**
@@ -619,7 +624,7 @@ public class Package implements Serializable {
    * Returns the default copts value, to which rules should append their
    * specific copts.
    */
-  public List<String> getDefaultCopts() {
+  public ImmutableList<String> getDefaultCopts() {
     return defaultCopts;
   }
 
@@ -699,8 +704,8 @@ public class Package implements Serializable {
    * <p>Should only be used by the package loading and the package deserialization machineries.
    */
   static class Builder extends AbstractBuilder<Package, Builder> {
-    Builder(String packageName) {
-      super(new Package(packageName));
+    Builder(PackageIdentifier packageId) {
+      super(new Package(packageId));
     }
 
     @Override
@@ -712,10 +717,10 @@ public class Package implements Serializable {
   /** Builder class for {@link Package} that does its own globbing. */
   public static class LegacyBuilder extends AbstractBuilder<Package, LegacyBuilder> {
 
-    private GlobCache globCache = null;
+    private Globber globber = null;
 
-    LegacyBuilder(String packageName) {
-      super(AbstractBuilder.newPackage(packageName));
+    LegacyBuilder(PackageIdentifier packageId) {
+      super(AbstractBuilder.newPackage(packageId));
     }
 
     @Override
@@ -724,34 +729,11 @@ public class Package implements Serializable {
     }
 
     /**
-     * Sets the cache to use for this package's glob expansions.
+     * Sets the globber used for this package's glob expansions.
      */
-    LegacyBuilder setGlobCache(GlobCache globCache) {
-      this.globCache = globCache;
+    LegacyBuilder setGlobber(Globber globber) {
+      this.globber = globber;
       return this;
-    }
-
-    /**
-     * Evaluate the build language expression "glob(includes, excludes)" in the
-     * context of this package.
-     */
-    List<String> glob(List<String> includes, List<String> excludes, boolean excludeDirs)
-        throws IOException, GlobCache.BadGlobException, InterruptedException {
-      if (globCache == null) {
-        throw new NullPointerException("globCache is null");
-      }
-
-      return globCache.glob(includes, excludes, excludeDirs);
-    }
-
-    /**
-     * Launches the given glob expressions, but does not block on their completion.
-     */
-    void globAsync(List<String> includes, List<String> excludes, boolean excludeDirs)
-        throws GlobCache.BadGlobException {
-      for (String pattern :  Iterables.concat(includes, excludes)) {
-        globCache.getGlobAsync(pattern, excludeDirs);
-      }
     }
 
     /**
@@ -769,8 +751,8 @@ public class Package implements Serializable {
      * package's BUILD file. Intended to be used only by {@link PackageFunction} to mark the
      * appropriate Skyframe dependencies after the fact.
      */
-    public Collection<Pair<String, Boolean>> getGlobPatterns() {
-      return globCache.getKeySet();
+    public Set<Pair<String, Boolean>> getGlobPatterns() {
+      return globber.getGlobPatterns();
     }
   }
 
@@ -786,7 +768,6 @@ public class Package implements Serializable {
     protected Path filename = null;
     private Label buildFileLabel = null;
     private InputFile buildFile = null;
-    private BuildFileAST ast = null;
     private MakeEnvironment.Builder makeEnv = null;
     private RuleVisibility defaultVisibility = null;
     private boolean defaultVisibilitySet;
@@ -802,6 +783,7 @@ public class Package implements Serializable {
     protected Map<String, Target> targets = new HashMap<>();
 
     protected Map<Label, Path> subincludes = null;
+    protected ImmutableList<Label> skylarkFileDependencies = null;
 
     /**
      * True iff the "package" function has already been called in this package.
@@ -828,11 +810,15 @@ public class Package implements Serializable {
       }
     }
 
-    protected static Package newPackage(String packageName) {
-      return new Package(packageName);
+    protected static Package newPackage(PackageIdentifier packageId) {
+      return new Package(packageId);
     }
 
     protected abstract B self();
+
+    protected PackageIdentifier getPackageIdentifier() {
+      return pkg.getPackageIdentifier();
+    }
 
     /**
      * Sets the name of this package's BUILD file.
@@ -840,7 +826,7 @@ public class Package implements Serializable {
     B setFilename(Path filename) {
       this.filename = filename;
       try {
-        buildFileLabel = Label.create(pkg.getName(), filename.getBaseName());
+        buildFileLabel = createLabel(filename.getBaseName());
         addInputFile(buildFileLabel, Location.fromFile(filename));
       } catch (Label.SyntaxException e) {
         // This can't actually happen.
@@ -851,18 +837,6 @@ public class Package implements Serializable {
 
     public Label getBuildFileLabel() {
       return buildFileLabel;
-    }
-
-    /**
-     * Sets the abstract syntax tree (AST) for this package's BUILD file. May be null.
-     */
-    B setAST(BuildFileAST ast) {
-      this.ast = ast;
-      return self();
-    }
-
-    PathFragment getNameFragment() {
-      return new PathFragment(pkg.name);
     }
 
     Path getFilename() {
@@ -970,7 +944,7 @@ public class Package implements Serializable {
       return self();
     }
 
-    B addEvents(Iterable<Event> events) {
+    public B addEvents(Iterable<Event> events) {
       for (Event event : events) {
         addEvent(event);
       }
@@ -979,6 +953,11 @@ public class Package implements Serializable {
 
     public B addEvent(Event event) {
       this.events.add(event);
+      return self();
+    }
+
+    B setSkylarkFileDependencies(ImmutableList<Label> skylarkFileDependencies) {
+      this.skylarkFileDependencies = skylarkFileDependencies;
       return self();
     }
 
@@ -1118,7 +1097,7 @@ public class Package implements Serializable {
      * @throws SyntaxException if the {@code targetName} is invalid
      */
     Label createLabel(String targetName) throws SyntaxException {
-      return buildFileLabel.getLocalTargetLabel(targetName);
+      return Label.create(pkg.getPackageIdentifier(), targetName);
     }
 
     /**
@@ -1277,7 +1256,6 @@ public class Package implements Serializable {
         throw nameConflict(rule, existing);
       }
       Map<String, OutputFile> outputFiles = new HashMap<>();
-      Map<String, OutputFile> ruleOutputFilePrefixes = new HashMap<>();
 
       for (OutputFile outputFile : rule.getOutputFiles()) {
         String outputFileName = outputFile.getName();
@@ -1290,9 +1268,6 @@ public class Package implements Serializable {
         }
 
         // Check if this output file is the prefix of an already existing one
-        if (ruleOutputFilePrefixes.containsKey(outputFileName)) {
-          throw conflictingOutputFile(outputFile, ruleOutputFilePrefixes.get(outputFileName));
-        }
         if (outputFilePrefixes.containsKey(outputFileName)) {
           throw conflictingOutputFile(outputFile, outputFilePrefixes.get(outputFileName));
         }

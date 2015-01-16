@@ -22,7 +22,6 @@ import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.packages.PackageIdentifier;
 import com.google.devtools.build.lib.util.StringCanonicalizer;
 import com.google.devtools.build.lib.util.StringUtilities;
-import com.google.devtools.build.lib.vfs.Canonicalizer;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
 import java.io.InvalidObjectException;
@@ -37,7 +36,7 @@ import java.io.Serializable;
  *
  * <p>Parsing is robust against bad input, for example, from the command line.
  */
-@SkylarkModule(name = "label", doc = "A BUILD target identifier.")
+@SkylarkModule(name = "Label", doc = "A BUILD target identifier.")
 @Immutable @ThreadSafe
 public final class Label implements Comparable<Label>, Serializable {
 
@@ -68,8 +67,8 @@ public final class Label implements Comparable<Label>, Serializable {
     }
     try {
       LabelValidator.PackageAndTarget labelParts = LabelValidator.parseAbsoluteLabel(absName);
-      return new Label(
-          repo, new PathFragment(labelParts.getPackageName()), labelParts.getTargetName());
+      return new Label(new PackageIdentifier(repo, new PathFragment(labelParts.getPackageName())),
+          labelParts.getTargetName());
     } catch (BadLabelException e) {
       throw new SyntaxException(e.getMessage());
     }
@@ -80,7 +79,6 @@ public final class Label implements Comparable<Label>, Serializable {
    * <pre>
    * //foo/bar
    * //foo/bar:quux
-   * //foo/bar:      (undocumented, but accepted)
    * </pre>
    */
   public static Label parseAbsolute(String absName) throws SyntaxException {
@@ -122,6 +120,15 @@ public final class Label implements Comparable<Label>, Serializable {
   }
 
   /**
+   * Similar factory to above, but takes a package identifier to allow external repository labels
+   * to be created.
+   */
+  public static Label create(PackageIdentifier packageId, String targetName)
+      throws SyntaxException {
+    return new Label(packageId, targetName);
+  }
+
+  /**
    * Resolves a relative label using a workspace-relative path to the current working directory. The
    * method handles these cases:
    * <ul>
@@ -154,7 +161,7 @@ public final class Label implements Comparable<Label>, Serializable {
     PathFragment path = workspaceRelativePath.getRelative(label.substring(0, index));
     // Use the String, String constructor, to make sure that the package name goes through the
     // validity check.
-    return new Label(path.getPathString(), label.substring(index+1));
+    return new Label(path.getPathString(), label.substring(index + 1));
   }
 
   /**
@@ -180,8 +187,7 @@ public final class Label implements Comparable<Label>, Serializable {
    * Validates the given package name and returns a canonical PathFragment instance if it is valid.
    * Otherwise it throws a SyntaxException.
    */
-  private static PathFragment canonicalizePackageName(String packageName, String name)
-      throws SyntaxException {
+  private static PathFragment validate(String packageName, String name) throws SyntaxException {
     String error = LabelValidator.validatePackageName(packageName);
     if (error != null) {
       error = "invalid package name '" + packageName + "': " + error;
@@ -193,21 +199,24 @@ public final class Label implements Comparable<Label>, Serializable {
       }
       throw new SyntaxException(error);
     }
-    return Canonicalizer.fragments().intern(new PathFragment(packageName));
+    return new PathFragment(packageName);
   }
 
   /** The name and repository of the package. */
-  private PackageIdentifier packageIdentifier;
+  private final PackageIdentifier packageIdentifier;
 
   /** The name of the target within the package. Canonical. */
-  private String name;
+  private final String name;
 
   /**
    * Constructor from a package name, target name. Both are checked for validity
    * and a SyntaxException is thrown if either is invalid.
+   * TODO(bazel-team): move the validation to {@link PackageIdentifier}. Unfortunately, there are a
+   * bazillion tests that use invalid package names (taking advantage of the fact that calling
+   * Label(PathFragment, String) doesn't validate the package name).
    */
   private Label(String packageName, String name) throws SyntaxException {
-    this(canonicalizePackageName(packageName, name), name);
+    this(validate(packageName, name), name);
   }
 
   /**
@@ -215,23 +224,22 @@ public final class Label implements Comparable<Label>, Serializable {
    * name is checked for validity and a SyntaxException is throw if it isn't.
    */
   private Label(PathFragment packageName, String name) throws SyntaxException {
-    this(PackageIdentifier.DEFAULT_REPOSITORY, packageName, name);
+    this(PackageIdentifier.createInDefaultRepo(packageName), name);
   }
 
-  private Label(String repositoryName, PathFragment packageName, String name)
+  private Label(PackageIdentifier packageIdentifier, String name)
       throws SyntaxException {
-    Preconditions.checkNotNull(repositoryName);
-    Preconditions.checkNotNull(packageName);
+    Preconditions.checkNotNull(packageIdentifier);
     Preconditions.checkNotNull(name);
 
     try {
-      this.packageIdentifier = new PackageIdentifier(repositoryName, packageName);
+      this.packageIdentifier = packageIdentifier;
       this.name = canonicalizeTargetName(name);
     } catch (SyntaxException e) {
       // This check is just for a more helpful error message
       // i.e. valid target name, invalid package name, colon-free label form
       // used => probably they meant "//foo:bar.c" not "//foo/bar.c".
-      if (packageName.getPathString().endsWith("/" + name)) {
+      if (packageIdentifier.getPackageFragment().getPathString().endsWith("/" + name)) {
         throw new SyntaxException(e.getMessage() + " (perhaps you meant \":" + name + "\"?)");
       }
       throw e;
@@ -304,7 +312,8 @@ public final class Label implements Comparable<Label>, Serializable {
    */
   @Override
   public String toString() {
-    return packageIdentifier + ":" + name;
+    return packageIdentifier.getRepository() + "//" + packageIdentifier.getPackageFragment()
+        + ":" + name;
   }
 
   /**
@@ -314,9 +323,9 @@ public final class Label implements Comparable<Label>, Serializable {
    * All other labels have identical shorthand and canonical forms.
    */
   public String toShorthandString() {
-    return getPackageFragment().getBaseName().equals(name)
+    return packageIdentifier.getRepository() + (getPackageFragment().getBaseName().equals(name)
         ? "//" + getPackageFragment()
-        : toString();
+        : toString());
   }
 
   /**
@@ -325,7 +334,7 @@ public final class Label implements Comparable<Label>, Serializable {
    * @throws SyntaxException if {@code targetName} is not a valid target name
    */
   public Label getLocalTargetLabel(String targetName) throws SyntaxException {
-    return new Label(getPackageName(), targetName);
+    return new Label(packageIdentifier, targetName);
   }
 
   /**
@@ -338,6 +347,13 @@ public final class Label implements Comparable<Label>, Serializable {
    *
    * @param relName the relative label name; must be non-empty.
    */
+  @SkylarkCallable(name = "relative", doc =
+        "Resolves a relative or absolute label name.<br>"
+      + "For example:<br><ul>" 
+      + "<li><code>:quux</code> relative to <code>//foo/bar:baz</code> is "
+      + "<code>//foo/bar:quux</code></li>" 
+      + "<li><code>//wiz:quux</code> relative to <code>//foo/bar:baz</code> is "
+      + "<code>//wiz:quux</code></li></ul>")
   public Label getRelative(String relName) throws SyntaxException {
     if (relName.length() == 0) {
       throw new SyntaxException("empty package-relative label");

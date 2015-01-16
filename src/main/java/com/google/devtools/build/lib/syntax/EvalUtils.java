@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
@@ -51,9 +52,9 @@ public abstract class EvalUtils {
   private static final ImmutableSet<Class<?>> quasiImmutableClasses;
   static {
     try {
-      ImmutableSet.Builder<Class<?>> builder = ImmutableSet.builder(); 
+      ImmutableSet.Builder<Class<?>> builder = ImmutableSet.builder();
       builder.add(Class.forName("com.google.devtools.build.lib.actions.Action"));
-      builder.add(Class.forName("com.google.devtools.build.lib.view.config.BuildConfiguration"));
+      builder.add(Class.forName("com.google.devtools.build.lib.analysis.config.BuildConfiguration"));
       builder.add(Class.forName("com.google.devtools.build.lib.actions.Root"));
       quasiImmutableClasses = builder.build();
     } catch (ClassNotFoundException e) {
@@ -116,8 +117,33 @@ public abstract class EvalUtils {
   }
 
   /**
+   * Returns a transitive superclass or interface implemented by c which is annotated
+   * with SkylarkModule. Returns null if no such class or interface exists.
+   */
+  @VisibleForTesting
+  static Class<?> getParentWithSkylarkModule(Class<?> c) {
+    if (c == null) {
+      return null;
+    }
+    if (c.isAnnotationPresent(SkylarkModule.class)) {
+      return c;
+    }
+    Class<?> parent = getParentWithSkylarkModule(c.getSuperclass());
+    if (parent != null) {
+      return parent;
+    }
+    for (Class<?> ifparent : c.getInterfaces()) {
+      ifparent = getParentWithSkylarkModule(ifparent);
+      if (ifparent != null) {
+        return ifparent;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Returns the Skylark equivalent type of the parameter. Note that the Skylark
-   * language doesn't have inheritance. 
+   * language doesn't have inheritance.
    */
   public static Class<?> getSkylarkType(Class<?> c) {
     if (ImmutableList.class.isAssignableFrom(c)) {
@@ -133,6 +159,13 @@ public abstract class EvalUtils {
       return NestedSet.class;
     } else if (Set.class.isAssignableFrom(c)) {
       return Set.class;
+    } else {
+      // Check if one of the superclasses or implemented interfaces has the SkylarkModule
+      // annotation. If yes return that class.
+      Class<?> parent = getParentWithSkylarkModule(c);
+      if (parent != null) {
+        return parent;
+      }
     }
     return c;
   }
@@ -260,7 +293,7 @@ public abstract class EvalUtils {
 
     } else if (o instanceof FilesetEntry) {
       FilesetEntry entry = (FilesetEntry) o;
-      buffer.append("FilesetEntry( srcdir = ");
+      buffer.append("FilesetEntry(srcdir = ");
       prettyPrintValue(entry.getSrcLabel().toString(), buffer);
       buffer.append(", files = ");
       prettyPrintValue(makeStringList(entry.getFiles()), buffer);
@@ -270,9 +303,9 @@ public abstract class EvalUtils {
       prettyPrintValue(entry.getDestDir().getPathString(), buffer);
       buffer.append(", strip_prefix = ");
       prettyPrintValue(entry.getStripPrefix(), buffer);
-      buffer.append(", symlinks = '");
+      buffer.append(", symlinks = \"");
       buffer.append(entry.getSymlinkBehavior().toString());
-      buffer.append("' )");
+      buffer.append("\")");
     } else if (o instanceof PathFragment) {
       buffer.append(((PathFragment) o).getPathString());
     } else {
@@ -280,7 +313,7 @@ public abstract class EvalUtils {
     }
   }
 
-  private static List<?> makeList(List<?> list) {
+  private static List<?> makeList(Collection<?> list) {
     return list == null ? Lists.newArrayList() : Lists.newArrayList(list);
   }
 
@@ -309,9 +342,12 @@ public abstract class EvalUtils {
 
   private static void prettyPrintValueX(Object o, Appendable buffer)
       throws IOException {
+    if (o instanceof Label) {
+      o = o.toString();  // Pretty-print a label like a string
+    }
     if (o instanceof String) {
       String s = (String) o;
-      buffer.append('\'');
+      buffer.append('"');
       for (int ii = 0, len = s.length(); ii < len; ++ii) {
         char c = s.charAt(ii);
         switch (c) {
@@ -324,8 +360,8 @@ public abstract class EvalUtils {
         case '\t':
           buffer.append('\\').append('t');
           break;
-        case '\'':
-          buffer.append('\\').append('\'');
+        case '\"':
+          buffer.append('\\').append('"');
           break;
         default:
           if (c < 32) {
@@ -335,7 +371,7 @@ public abstract class EvalUtils {
           }
         } // endswitch
       }
-      buffer.append('\'');
+      buffer.append('\"');
     } else {
       printValueX(o, buffer);
     }

@@ -15,27 +15,50 @@
 package com.google.devtools.build.lib.rules.objc;
 
 import com.google.common.base.Preconditions;
-import com.google.devtools.build.lib.view.config.BuildConfiguration.Fragment;
+import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration.Fragment;
 import com.google.devtools.build.xcode.common.Platform;
+
+import java.util.List;
 
 /**
  * A compiler configuration containing flags required for Objective-C compilation.
  */
 public class ObjcConfiguration extends Fragment {
   private final String iosSdkVersion;
+  private final String iosMinimumOs;
+  private final String iosSimulatorVersion;
   private final String iosCpu;
   private final String xcodeOptions;
   private final boolean generateDebugSymbols;
+  private final List<String> copts;
 
   ObjcConfiguration(ObjcCommandLineOptions objcOptions) {
     this.iosSdkVersion = Preconditions.checkNotNull(objcOptions.iosSdkVersion, "iosSdkVersion");
+    this.iosMinimumOs = Preconditions.checkNotNull(objcOptions.iosMinimumOs, "iosMinimumOs");
+    this.iosSimulatorVersion =
+        Preconditions.checkNotNull(objcOptions.iosSimulatorVersion, "iosSimulatorVersion");
     this.iosCpu = Preconditions.checkNotNull(objcOptions.iosCpu, "iosCpu");
     this.xcodeOptions = Preconditions.checkNotNull(objcOptions.xcodeOptions, "xcodeOptions");
     this.generateDebugSymbols = objcOptions.generateDebugSymbols;
+    this.copts = ImmutableList.copyOf(objcOptions.copts);
   }
 
   public String getIosSdkVersion() {
     return iosSdkVersion;
+  }
+
+  /**
+   * Returns the minimum iOS version supported by binaries and libraries. Any dependencies on newer
+   * iOS version features or libraries will become weak dependencies which are only loaded if the
+   * runtime OS supports them.
+   */
+  public String getMinimumOs() {
+    return iosMinimumOs;
+  }
+
+  public String getIosSimulatorVersion() {
+    return iosSimulatorVersion;
   }
 
   public String getIosCpu() {
@@ -52,6 +75,14 @@ public class ObjcConfiguration extends Fragment {
 
   public boolean generateDebugSymbols() {
     return generateDebugSymbols;
+  }
+
+  /**
+   * Returns options passed to (Apple) clang when compiling Objective C. These options should be
+   * applied after any default options but before options specified in the attributes of the rule.
+   */
+  public List<String> getCopts() {
+    return copts;
   }
 
   @Override

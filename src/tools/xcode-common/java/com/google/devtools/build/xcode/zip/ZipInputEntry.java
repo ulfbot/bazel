@@ -30,13 +30,44 @@ import java.nio.file.attribute.BasicFileAttributes;
  * Describes an entry in a zip file when the zip file is being created.
  */
 public class ZipInputEntry extends Value<ZipInputEntry> {
+  /**
+   * The external file attribute used for files by default. This indicates a non-executable regular
+   * file that is readable by group and world.
+   */
+  public static final int DEFAULT_EXTERNAL_FILE_ATTRIBUTE = (0100644 << 16);
+
+  /**
+   * An external file attribute that indicates an executable regular file that is readable and
+   * executable by group and world.
+   */
+  public static final int EXECUTABLE_EXTERNAL_FILE_ATTRIBUTE = (0100755 << 16);
+
+  /**
+   * The central directory record information that is used when adding a plain, non-executable file.
+   */
+  public static final ZipCombiner.DirectoryEntryInfo DEFAULT_DIRECTORY_ENTRY_INFO =
+      ZipCombiner.DEFAULT_DIRECTORY_ENTRY_INFO
+          // This is what .ipa files built by Xcode are set to. Upper byte indicates Unix host.
+          // Lower byte indicates version of encoding software
+          // (note that 0x1e = 30 = (3.0 * 10), so 0x1e translates to 3.0).
+          // The Unix host value in the upper byte is what causes the external file attribute to be
+          // interpreted as POSIX permission and file type bits.
+          .withMadeByVersion((short) 0x031e)
+          .withExternalFileAttribute(DEFAULT_EXTERNAL_FILE_ATTRIBUTE);
+
   private final Path source;
   private final String zipPath;
+  private final int externalFileAttribute;
 
   public ZipInputEntry(Path source, String zipPath) {
-    super(source, zipPath);
+    this(source, zipPath, DEFAULT_EXTERNAL_FILE_ATTRIBUTE);
+  }
+
+  public ZipInputEntry(Path source, String zipPath, int externalFileAttribute) {
+    super(source, zipPath, externalFileAttribute);
     this.source = source;
     this.zipPath = zipPath;
+    this.externalFileAttribute = externalFileAttribute;
   }
 
   /**
@@ -54,11 +85,21 @@ public class ZipInputEntry extends Value<ZipInputEntry> {
   }
 
   /**
+   * The external file attribute field of the zip entry in the central directory record. On
+   * Unix-originated .zips, this corresponds to the permission bits (e.g. 0755 for an excutable
+   * file).
+   */
+  public int getExternalFileAttribute() {
+    return externalFileAttribute;
+  }
+
+  /**
    * Adds this entry to a zip using the given {@code ZipCombiner}.
    */
   public void add(ZipCombiner combiner) throws IOException {
     try (InputStream inputStream = Files.newInputStream(source)) {
-      combiner.addFile(zipPath, ZipCombiner.DOS_EPOCH, inputStream);
+      combiner.addFile(zipPath, ZipCombiner.DOS_EPOCH, inputStream,
+          DEFAULT_DIRECTORY_ENTRY_INFO.withExternalFileAttribute(externalFileAttribute));
     }
   }
 
@@ -89,6 +130,8 @@ public class ZipInputEntry extends Value<ZipInputEntry> {
     Files.walkFileTree(rootDirectory, new SimpleFileVisitor<Path>() {
       @Override
       public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+        // TODO(bazel-team): Set the external file attribute based on the attribute of the
+        // permissions of the file on-disk.
         zipInputs.add(new ZipInputEntry(file, rootDirectory.relativize(file).toString()));
         return FileVisitResult.CONTINUE;
       }

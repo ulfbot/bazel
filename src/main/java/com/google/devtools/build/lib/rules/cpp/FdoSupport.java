@@ -24,7 +24,10 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactFactory;
+import com.google.devtools.build.lib.actions.PackageRootResolver;
 import com.google.devtools.build.lib.actions.Root;
+import com.google.devtools.build.lib.analysis.AnalysisEnvironment;
+import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadHostile;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.skyframe.FileValue;
@@ -35,14 +38,13 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.lib.vfs.ZipFileSystem;
-import com.google.devtools.build.lib.view.AnalysisEnvironment;
-import com.google.devtools.build.lib.view.RuleContext;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.LipoMode;
 import com.google.devtools.build.skyframe.SkyFunction;
 
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.regex.Pattern;
 import java.util.zip.ZipException;
@@ -256,7 +258,8 @@ public class FdoSupport implements Serializable {
    */
   @ThreadHostile // must be called before starting the build
   public void prepareToBuild(Path execRoot, PathFragment genfilesPath,
-      ArtifactFactory artifactDeserializer) throws IOException, FdoException {
+      ArtifactFactory artifactDeserializer, PackageRootResolver resolver)
+      throws IOException, FdoException {
     // The execRoot != null case is only there for testing. We cannot provide a real ZIP file in
     // tests because ZipFileSystem does not work with a ZIP on an in-memory file system.
     // IMPORTANT: Keep in sync with #declareSkyframeDependencies to avoid incrementality issues.
@@ -270,7 +273,7 @@ public class FdoSupport implements Serializable {
         Path fdoImports = fdoProfile.getParentDirectory().getRelative(
             fdoProfile.getBaseName() + ".imports");
         if (isLipoEnabled()) {
-          imports = readAutoFdoImports(artifactDeserializer, fdoImports, genfilesPath);
+          imports = readAutoFdoImports(artifactDeserializer, fdoImports, genfilesPath, resolver);
         }
         FileSystemUtils.ensureSymbolicLink(
             execRoot.getRelative(getAutoProfilePath()), fdoProfile);
@@ -284,7 +287,7 @@ public class FdoSupport implements Serializable {
         ImmutableMultimap.Builder<PathFragment, Artifact> importsBuilder =
             ImmutableMultimap.builder();
         extractFdoZip(artifactDeserializer, zipFilePath, fdoDirPath,
-            gcdaFilesBuilder, importsBuilder);
+            gcdaFilesBuilder, importsBuilder, resolver);
         gcdaFiles = gcdaFilesBuilder.build();
         imports = importsBuilder.build();
       }
@@ -310,20 +313,21 @@ public class FdoSupport implements Serializable {
    */
   private void extractFdoZip(ArtifactFactory artifactFactory, Path sourceDir,
       Path targetDir, ImmutableSet.Builder<PathFragment> gcdaFilesBuilder,
-      ImmutableMultimap.Builder<PathFragment, Artifact> importsBuilder)
-          throws IOException, FdoException {
+      ImmutableMultimap.Builder<PathFragment, Artifact> importsBuilder,
+      PackageRootResolver resolver) throws IOException, FdoException {
     for (Path sourceFile : sourceDir.getDirectoryEntries()) {
       Path targetFile = targetDir.getRelative(sourceFile.getBaseName());
       if (sourceFile.isDirectory()) {
         targetFile.createDirectory();
-        extractFdoZip(artifactFactory, sourceFile, targetFile, gcdaFilesBuilder, importsBuilder);
+        extractFdoZip(artifactFactory, sourceFile, targetFile, gcdaFilesBuilder, importsBuilder,
+            resolver);
       } else {
         if (CppFileTypes.COVERAGE_DATA.matches(sourceFile)) {
           FileSystemUtils.copyFile(sourceFile, targetFile);
           gcdaFilesBuilder.add(
               sourceFile.relativeTo(sourceFile.getFileSystem().getRootDirectory()));
         } else if (CppFileTypes.COVERAGE_DATA_IMPORTS.matches(sourceFile)) {
-          readCoverageImports(artifactFactory, sourceFile, importsBuilder);
+          readCoverageImports(artifactFactory, sourceFile, importsBuilder, resolver);
         } else {
             throw new FdoException("FDO ZIP file contained a file of unknown type: "
                 + sourceFile);
@@ -338,8 +342,8 @@ public class FdoSupport implements Serializable {
    * @throws FdoException if an auxiliary LIPO input was not found
    */
   private void readCoverageImports(ArtifactFactory artifactFactory, Path importsFile,
-      ImmutableMultimap.Builder<PathFragment, Artifact> importsBuilder)
-          throws IOException, FdoException {
+      ImmutableMultimap.Builder<PathFragment, Artifact> importsBuilder,
+      PackageRootResolver resolver) throws IOException, FdoException {
     PathFragment key = importsFile.asFragment().relativeTo(ZIP_ROOT);
     String baseName = key.getBaseName();
     String ext = Iterables.getOnlyElement(CppFileTypes.COVERAGE_DATA_IMPORTS.getExtensions());
@@ -349,8 +353,12 @@ public class FdoSupport implements Serializable {
       if (!line.isEmpty()) {
         // We can't yet fully check the validity of a line. this is done later
         // when we actually parse the contained paths.
-        Artifact artifact = artifactFactory.deserializeArtifact(
-            new PathFragment(line));
+        PathFragment execPath = new PathFragment(line);
+        if (execPath.isAbsolute()) {
+          throw new FdoException("Absolute paths not allowed in gcda imports file " + importsFile
+              + ": " + execPath);
+        }
+        Artifact artifact = artifactFactory.deserializeArtifact(new PathFragment(line), resolver);
         if (artifact == null) {
           throw new FdoException("Auxiliary LIPO input not found: " + line);
         }
@@ -364,7 +372,8 @@ public class FdoSupport implements Serializable {
    * Reads a .afdo.imports file and stores the imports information.
    */
   private ImmutableMultimap<PathFragment, Artifact> readAutoFdoImports(
-      ArtifactFactory artifactFactory, Path importsFile, PathFragment genFilePath)
+      ArtifactFactory artifactFactory, Path importsFile, PathFragment genFilePath,
+      PackageRootResolver resolver)
           throws IOException, FdoException {
     ImmutableMultimap.Builder<PathFragment, Artifact> importBuilder = ImmutableMultimap.builder();
     for (String line : FileSystemUtils.iterateLinesAsLatin1(importsFile)) {
@@ -373,13 +382,17 @@ public class FdoSupport implements Serializable {
         if (key.startsWith(genFilePath)) {
           key = key.relativeTo(genFilePath);
         }
+        if (key.isAbsolute()) {
+          throw new FdoException("Absolute paths not allowed in afdo imports file " + importsFile
+              + ": " + key);
+        }
         key = FileSystemUtils.replaceSegments(key, "PROTECTED", "_protected", true);
         for (String auxFile : line.substring(line.indexOf(':') + 1).split(" ")) {
           if (auxFile.length() == 0) {
             continue;
           }
-          Artifact artifact = artifactFactory.deserializeArtifact(
-              new PathFragment(auxFile));
+          Artifact artifact = artifactFactory.deserializeArtifact(new PathFragment(auxFile),
+              resolver);
           if (artifact == null) {
             throw new FdoException("Auxiliary LIPO input not found: " + auxFile);
           }
@@ -395,7 +408,7 @@ public class FdoSupport implements Serializable {
    *
    * @param sourceName the source file
    */
-  private Iterable<Artifact> getAutoFdoImports(PathFragment sourceName) {
+  private Collection<Artifact> getAutoFdoImports(PathFragment sourceName) {
     Preconditions.checkState(isLipoEnabled());
     ImmutableCollection<Artifact> afdoImports = imports.get(sourceName);
     Preconditions.checkState(afdoImports != null,
@@ -497,9 +510,7 @@ public class FdoSupport implements Serializable {
       env.registerAction(new FdoStubAction(ruleContext.getActionOwner(), artifact));
       auxiliaryInputs.add(artifact);
       if (lipoContextProvider != null) {
-        for (Artifact importedFile : getAutoFdoImports(sourceName)) {
-          auxiliaryInputs.add(importedFile);
-        }
+        auxiliaryInputs.addAll(getAutoFdoImports(sourceName));
       }
       return auxiliaryInputs.build();
     } else {

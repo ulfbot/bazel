@@ -19,6 +19,13 @@ import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.AlwaysBuiltArtifactsProvider;
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.Runfiles;
+import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
@@ -34,14 +41,8 @@ import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.util.FileType;
 import com.google.devtools.build.lib.util.FileTypeSet;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.AlwaysBuiltArtifactsProvider;
-import com.google.devtools.build.lib.view.ConfiguredTarget;
-import com.google.devtools.build.lib.view.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.view.RuleConfiguredTargetBuilder;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.Runfiles;
-import com.google.devtools.build.lib.view.RunfilesProvider;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -143,7 +144,8 @@ public abstract class CcLibrary implements RuleConfiguredTargetFactory {
         .addPicIndependentObjectFiles(common.getLinkerScripts())
         .addDeps(ruleContext.getPrerequisites("deps", Mode.TARGET))
         .addPlugins(common.getPlugins())
-        .setEnableLayeringCheck(ruleContext.getFeatures().contains("layering_check"))
+        .setEnableLayeringCheck(ruleContext.getFeatures().contains(CppRuleClasses.LAYERING_CHECK))
+        .setCompileHeaderModules(ruleContext.getFeatures().contains(CppRuleClasses.HEADER_MODULES))
         .addSystemIncludeDirs(common.getSystemIncludeDirs())
         .addIncludeDirs(common.getIncludeDirs())
         .addLooseIncludeDirs(common.getLooseIncludeDirs())
@@ -169,7 +171,7 @@ public abstract class CcLibrary implements RuleConfiguredTargetFactory {
         ruleContext.attributeError("outs", "must be a singleton list");
       } else if (outs.size() == 1) {
         soImplFilename = CppHelper.getLinkedFilename(ruleContext, LinkTargetType.DYNAMIC_LIBRARY);
-        soImplFilename = soImplFilename.replaceName(outs.iterator().next());
+        soImplFilename = soImplFilename.replaceName(outs.get(0));
         if (!soImplFilename.getPathString().endsWith(".so")) { // Sanity check.
           ruleContext.attributeError("outs", "file name must end in '.so'");
         }
@@ -178,7 +180,7 @@ public abstract class CcLibrary implements RuleConfiguredTargetFactory {
 
     if (ruleContext.getRule().isAttrDefined("srcs", Type.LABEL_LIST)) {
       helper.addPrivateHeaders(FileType.filter(
-          ruleContext.getPrerequisiteArtifacts("srcs", Mode.TARGET),
+          ruleContext.getPrerequisiteArtifacts("srcs", Mode.TARGET).list(),
           CppFileTypes.CPP_HEADER));
       ruleContext.checkSrcsSamePackage(true);
     }
@@ -251,14 +253,15 @@ public abstract class CcLibrary implements RuleConfiguredTargetFactory {
     Runfiles sharedRunfiles = collectRunfiles(ruleContext,
         linkingOutputs, neverLink, addDynamicRuntimeInputArtifactsToRunfiles, false);
 
-    Iterable<Artifact> objectFiles = info.getCcCompilationOutputs().getObjectFiles(
-        CppHelper.usePic(ruleContext, false));
+    List<Artifact> instrumentedObjectFiles = new ArrayList<>();
+    instrumentedObjectFiles.addAll(info.getCcCompilationOutputs().getObjectFiles(false));
+    instrumentedObjectFiles.addAll(info.getCcCompilationOutputs().getObjectFiles(true));
     targetBuilder
         .setFilesToBuild(filesToBuild)
         .addProviders(info.getProviders())
         .add(InstrumentedFilesProvider.class, new InstrumentedFilesProviderImpl(
-            common.getInstrumentedFiles(objectFiles),
-            common.getInstrumentationMetadataFiles(objectFiles)))
+            common.getInstrumentedFiles(instrumentedObjectFiles),
+            common.getInstrumentationMetadataFiles(instrumentedObjectFiles)))
         .add(RunfilesProvider.class, RunfilesProvider.withData(staticRunfiles, sharedRunfiles))
         // Remove this?
         .add(CppRunfilesProvider.class, new CppRunfilesProvider(staticRunfiles, sharedRunfiles))
@@ -315,8 +318,8 @@ public abstract class CcLibrary implements RuleConfiguredTargetFactory {
     } else {
       if (!linkstaticAttribute && appearsToHaveNoObjectFiles(ruleContext.attributes())) {
         Artifact element = ccCompilationOutputs.getObjectFiles(false).isEmpty()
-            ? ccCompilationOutputs.getObjectFiles(true).iterator().next()
-            : ccCompilationOutputs.getObjectFiles(false).iterator().next();
+            ? ccCompilationOutputs.getObjectFiles(true).get(0)
+            : ccCompilationOutputs.getObjectFiles(false).get(0);
         ruleContext.attributeWarning("srcs",
              "this library appears at first glance to have no object files, "
              + "but on closer inspection it does have something to link, e.g. "

@@ -159,7 +159,8 @@ class RunfilesCreator {
       }
       std::string link(buf, s-buf);
       const char *target = s+1;
-      if (!allow_relative && target[0] != '\0' && target[0] != '/' && target[1] != ':') {
+      if (!allow_relative && target[0] != '\0' && target[0] != '/'
+          && target[1] != ':') {  // Match Windows paths, e.g. C:\foo or C:/foo.
         DIE("expected absolute path at line %d: '%s'\n", lineno, buf);
       }
 
@@ -179,7 +180,7 @@ class RunfilesCreator {
         int k = link.rfind('/');
         if (k < 0) break;
         link.erase(k, std::string::npos);
-        if (!manifest_.insert(make_pair(link, parent_info)).second) break;
+        if (!manifest_.insert(std::make_pair(link, parent_info)).second) break;
       }
     }
     if (fclose(outfile) != 0) {

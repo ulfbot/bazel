@@ -17,26 +17,39 @@ package com.google.devtools.build.lib.rules.objc;
 import static com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition.HOST;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.ImplicitOutputsFunction.fromTemplates;
+import static com.google.devtools.build.lib.packages.Type.BOOLEAN;
 import static com.google.devtools.build.lib.packages.Type.LABEL;
 import static com.google.devtools.build.lib.packages.Type.LABEL_LIST;
 import static com.google.devtools.build.lib.packages.Type.STRING_LIST;
+import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.HDRS_TYPE;
+import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.NON_ARC_SRCS_TYPE;
+import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.PLIST_TYPE;
+import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.SRCS_TYPE;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.BaseRuleClasses;
+import com.google.devtools.build.lib.analysis.BlazeRule;
+import com.google.devtools.build.lib.analysis.FilesToRunProvider;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.RuleDefinition;
+import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.packages.Attribute;
+import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction.SafeImplicitOutputsFunction;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
 import com.google.devtools.build.lib.packages.Type;
+import com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.ObjcOptsRule;
+import com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.ObjcSdkFrameworksRule;
 import com.google.devtools.build.lib.util.FileType;
 import com.google.devtools.build.lib.util.FileTypeSet;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.BaseRuleClasses;
-import com.google.devtools.build.lib.view.BlazeRule;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.RuleDefinition;
-import com.google.devtools.build.lib.view.RuleDefinitionEnvironment;
 
 /**
  * Shared utility code for Objective-C rules.
@@ -61,9 +74,53 @@ public class ObjcRuleClasses {
         ruleContext.getBinOrGenfilesDirectory());
   }
 
-  static Artifact artifactByAppendingToBaseName(RuleContext context, String suffix) {
+  static IntermediateArtifacts intermediateArtifacts(RuleContext ruleContext) {
+    return new IntermediateArtifacts(
+        ruleContext.getAnalysisEnvironment(), ruleContext.getBinOrGenfilesDirectory(),
+        ruleContext.getLabel());
+  }
+
+  /**
+   * Returns a {@link IntermediateArtifacts} to be used to compile and link the ObjC source files
+   * in {@code j2ObjcSource}.
+   */
+  static IntermediateArtifacts j2objcIntermediateArtifacts(RuleContext ruleContext,
+      J2ObjcSource j2ObjcSource) {
+    return new IntermediateArtifacts(
+        ruleContext.getAnalysisEnvironment(),
+        ruleContext.getConfiguration().getBinDirectory(),
+        j2ObjcSource.getSourceJar().getOwner());
+  }
+
+  /**
+   * Returns a {@link J2ObjcSrcsProvider} based on the given {@code ruleContext}.
+   */
+  public static J2ObjcSrcsProvider j2ObjcSrcsProvider(RuleContext ruleContext) {
+    NestedSetBuilder<J2ObjcSource> builder = NestedSetBuilder.stableOrder();
+    for (J2ObjcSrcsProvider provider :
+        ruleContext.getPrerequisites("deps", Mode.TARGET, J2ObjcSrcsProvider.class)) {
+      builder.addTransitive(provider.getSrcs());
+    }
+
+    return new J2ObjcSrcsProvider(builder.build());
+  }
+
+  public static Artifact artifactByAppendingToBaseName(RuleContext context, String suffix) {
     return artifactByAppendingToRootRelativePath(
         context, context.getLabel().toPathFragment(), suffix);
+  }
+
+  static ObjcActionsBuilder actionsBuilder(RuleContext ruleContext) {
+    return new ObjcActionsBuilder(
+        ruleContext,
+        intermediateArtifacts(ruleContext),
+        ObjcRuleClasses.objcConfiguration(ruleContext),
+        ruleContext.getConfiguration(),
+        ruleContext);
+  }
+
+  public static ObjcConfiguration objcConfiguration(RuleContext ruleContext) {
+    return ruleContext.getFragment(ObjcConfiguration.class);
   }
 
   @VisibleForTesting
@@ -94,19 +151,57 @@ public class ObjcRuleClasses {
   }
 
   /**
+   * Attributes for {@code objc_*} rules that can link in SDK frameworks.
+   */
+  @BlazeRule(name = "$objc_sdk_frameworks_rule",
+      type = RuleClassType.ABSTRACT)
+  public static class ObjcSdkFrameworksRule implements RuleDefinition {
+    @Override
+    public RuleClass build(Builder builder, RuleDefinitionEnvironment environment) {
+      return builder
+          /* <!-- #BLAZE_RULE($objc_sdk_frameworks_rule).ATTRIBUTE(sdk_frameworks) -->
+          Names of SDK frameworks to link with. For instance, "XCTest" or
+          "Cocoa". "UIKit" and "Foundation" are always included and do not mean
+          anything if you include them.
+          When linking a library, only those frameworks named in that library's
+          sdk_frameworks attribute are linked in. When linking a binary, all
+          SDK frameworks named in that binary's transitive dependency graph are
+          used.
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+          .add(attr("sdk_frameworks", STRING_LIST))
+          /* <!-- #BLAZE_RULE($objc_sdk_frameworks_rule).ATTRIBUTE(weak_sdk_frameworks) -->
+          Names of SDK frameworks to weakly link with. For instance,
+          "MediaAccessibility". In difference to regularly linked SDK
+          frameworks, symbols from weakly linked frameworks do not cause an
+          error if they are not present at runtime.
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+          .add(attr("weak_sdk_frameworks", STRING_LIST))
+          /* <!-- #BLAZE_RULE($objc_sdk_frameworks_rule).ATTRIBUTE(sdk_dylibs) -->
+          Names of SDK .dylib libraries to link with. For instance, "libz" or
+          "libarchive". "libc++" is included automatically if the binary has
+          any C++ or Objective-C++ sources in its dependency tree. When linking
+          a binary, all libraries named in that binary's transitive dependency
+          graph are used.
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+          .add(attr("sdk_dylibs", STRING_LIST))
+          .build();
+    }
+  }
+
+  /**
    * Iff a file matches this type, it is considered to use C++.
    */
   static final FileType CPP_SOURCES = FileType.of(".cc", ".cpp", ".mm", ".cxx");
 
-  @VisibleForTesting
-  static final FileTypeSet SRCS_TYPE = FileTypeSet.of(FileType.of(".m", ".c"), CPP_SOURCES);
+  private static final FileType NON_CPP_SOURCES = FileType.of(".m", ".c");
 
-  @VisibleForTesting
+  static final FileTypeSet SRCS_TYPE = FileTypeSet.of(NON_CPP_SOURCES, CPP_SOURCES);
+
   static final FileTypeSet NON_ARC_SRCS_TYPE = FileTypeSet.of(FileType.of(".m", ".mm"));
 
   // TODO(bazel-team): Remove .pch when depot cleanup is done
-  @VisibleForTesting
-  static final FileTypeSet HDRS_TYPE = FileTypeSet.of(FileType.of(".m", ".h", ".hh", ".pch"));
+  static final FileTypeSet HDRS_TYPE =
+      FileTypeSet.of(CPP_SOURCES, NON_CPP_SOURCES, FileType.of(".h", ".hh", ".pch"));
 
   static final FileTypeSet PLIST_TYPE = FileTypeSet.of(FileType.of(".plist"));
 
@@ -119,7 +214,7 @@ public class ObjcRuleClasses {
    */
   @BlazeRule(name = "$objc_base_rule",
       type = RuleClassType.ABSTRACT,
-      ancestors = { BaseRuleClasses.RuleBase.class })
+      ancestors = { BaseRuleClasses.RuleBase.class, ObjcSdkFrameworksRule.class })
   public static class ObjcBaseRule implements RuleDefinition {
     @Override
     public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
@@ -144,6 +239,12 @@ public class ObjcRuleClasses {
           actual client root.
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .add(attr("includes", Type.STRING_LIST))
+          /* <!-- #BLAZE_RULE($objc_base_rule).ATTRIBUTE(sdk_includes) -->
+          List of <code>#include/#import</code> search paths to add to this target
+          and all depending targets, where each path is relative to
+          <code>$(SDKROOT)/usr/include</code>.
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+          .add(attr("sdk_includes", Type.STRING_LIST))
           /* <!-- #BLAZE_RULE($objc_base_rule).ATTRIBUTE(asset_catalogs) -->
           Files that comprise the asset catalogs of the final linked binary.
           Each file must have a containing directory named *.xcassets. This
@@ -184,24 +285,6 @@ public class ObjcRuleClasses {
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .add(attr("storyboards", LABEL_LIST)
               .allowedFileTypes(STORYBOARD_TYPE))
-          /* <!-- #BLAZE_RULE($objc_base_rule).ATTRIBUTE(sdk_frameworks) -->
-          Names of SDK frameworks to link with. For instance, "XCTest" or
-          "Cocoa". "UIKit" and "Foundation" are always included and do not mean
-          anything if you include them.
-          When linking a library, only those frameworks named in that library's
-          sdk_frameworks attribute are linked in. When linking a binary, all
-          SDK frameworks named in that binary's transitive dependency graph are
-          used.
-          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
-          .add(attr("sdk_frameworks", STRING_LIST))
-          /* <!-- #BLAZE_RULE($objc_base_rule).ATTRIBUTE(sdk_dylibs) -->
-          Names of SDK .dylib libraries to link with. For instance, "libz" or
-          "libarchive". "libc++" is included automatically if the binary has
-          any C++ or Objective-C++ sources in its dependency tree. When linking
-          a binary, all libraries named in that binary's transitive dependency
-          graph are used.
-          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
-          .add(attr("sdk_dylibs", STRING_LIST))
           /* <!-- #BLAZE_RULE($objc_base_rule).ATTRIBUTE(resources) -->
           Files to include in the final application bundle. They are not
           processed or compiled in any way besides the processing done by the
@@ -231,4 +314,85 @@ public class ObjcRuleClasses {
           .build();
     }
   }
+
+  /**
+   * Base rule definition for iOS test rules.
+   */
+  @BlazeRule(name = "$ios_test_base_rule",
+      type = RuleClassType.ABSTRACT,
+      ancestors = { ObjcBinaryRule.class })
+  public static class IosTestBaseRule implements RuleDefinition {
+    @Override
+    public RuleClass build(Builder builder, final RuleDefinitionEnvironment env) {
+      return builder
+          /* <!-- #BLAZE_RULE($ios_test_base_rule).ATTRIBUTE(target_device) -->
+          The device against which to run the test.
+          ${SYNOPSIS}
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+          .add(attr(IosTest.TARGET_DEVICE, LABEL)
+              .allowedFileTypes()
+              .allowedRuleClasses("ios_device"))
+          /* <!-- #BLAZE_RULE($ios_test_base_rule).ATTRIBUTE(xctest) -->
+          Whether this target contains tests using the XCTest testing framework.
+          ${SYNOPSIS}
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+          .add(attr(IosTest.IS_XCTEST, BOOLEAN))
+          /* <!-- #BLAZE_RULE($ios_test_base_rule).ATTRIBUTE(xctest_app) -->
+          A <code>objc_binary</code> target that contains the app bundle to test against in XCTest.
+          This attribute is only valid if <code>xctest</code> is true.
+          ${SYNOPSIS}
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+          .add(attr(IosTest.XCTEST_APP, LABEL)
+              .value(new Attribute.ComputedDefault(IosTest.IS_XCTEST) {
+                @Override
+                public Object getDefault(AttributeMap rule) {
+                  return rule.get(IosTest.IS_XCTEST, Type.BOOLEAN)
+                      ? env.getLabel("//tools/objc:xctest_app")
+                      : null;
+                }
+              })
+              .allowedFileTypes()
+              .allowedRuleClasses("objc_binary"))
+          .override(attr("infoplist", LABEL)
+              .value(new Attribute.ComputedDefault(IosTest.IS_XCTEST) {
+                @Override
+                public Object getDefault(AttributeMap rule) {
+                  return rule.get(IosTest.IS_XCTEST, Type.BOOLEAN)
+                      ? env.getLabel("//tools/objc:xctest_infoplist")
+                      : null;
+                }
+              })
+              .allowedFileTypes(PLIST_TYPE))
+          .build();
+    }
+  }
+
+  /**
+   * Object that supplies tools used by all rules which have the helper tools common to most rule
+   * implementations.
+   */
+  static final class Tools {
+    private final RuleContext ruleContext;
+  
+    Tools(RuleContext ruleContext) {
+      this.ruleContext = Preconditions.checkNotNull(ruleContext);
+    }
+  
+    Artifact actooloribtoolzipDeployJar() {
+      return ruleContext.getPrerequisiteArtifact("$actooloribtoolzip_deploy", Mode.HOST);
+    }
+  
+    Artifact momczipDeployJar() {
+      return ruleContext.getPrerequisiteArtifact("$momczip_deploy", Mode.HOST);
+    }
+  
+    FilesToRunProvider xcodegen() {
+      return ruleContext.getExecutablePrerequisite("$xcodegen", Mode.HOST);
+    }
+  
+    FilesToRunProvider plmerge() {
+      return ruleContext.getExecutablePrerequisite("$plmerge", Mode.HOST);
+    }
+  }
 }
+

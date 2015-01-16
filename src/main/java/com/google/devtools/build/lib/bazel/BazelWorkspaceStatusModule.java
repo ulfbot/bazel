@@ -30,14 +30,14 @@ import com.google.devtools.build.lib.actions.Executor.ActionContext;
 import com.google.devtools.build.lib.actions.ExecutorInitException;
 import com.google.devtools.build.lib.actions.ResourceSet;
 import com.google.devtools.build.lib.actions.Root;
+import com.google.devtools.build.lib.analysis.BuildInfoHelper;
+import com.google.devtools.build.lib.analysis.WorkspaceStatusAction;
+import com.google.devtools.build.lib.analysis.WorkspaceStatusAction.Key;
 import com.google.devtools.build.lib.blaze.BlazeModule;
 import com.google.devtools.build.lib.blaze.BlazeRuntime;
 import com.google.devtools.build.lib.blaze.Command;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.BuildInfoHelper;
-import com.google.devtools.build.lib.view.WorkspaceStatusAction;
-import com.google.devtools.build.lib.view.WorkspaceStatusAction.Key;
 
 import java.io.IOException;
 import java.util.Map;
@@ -132,14 +132,10 @@ public class BazelWorkspaceStatusModule extends BlazeModule {
         ArtifactFactory factory, ArtifactOwner artifactOwner, Supplier<UUID> buildId) {
       Root root = runtime.getDirectories().getBuildDataDirectory();
 
-      Artifact stableArtifact =
-          factory.getSpecialMetadataHandlingArtifact(new PathFragment("stable-status.txt"),
-              root, artifactOwner,
-              /*forceConstantMetadata=*/false, /*forceDigestMetadata=*/true);
-      Artifact volatileArtifact =
-          factory.getSpecialMetadataHandlingArtifact(new PathFragment("volatile-status.txt"),
-              root, artifactOwner,
-            /*forceConstantMetadata=*/true, /*forceDigestMetadata=*/false);
+      Artifact stableArtifact = factory.getDerivedArtifact(
+          new PathFragment("stable-status.txt"), root, artifactOwner);
+      Artifact volatileArtifact = factory.getConstantMetadataArtifact(
+          new PathFragment("volatile-status.txt"), root, artifactOwner);
 
       return new BazelWorkspaceStatusAction(stableArtifact, volatileArtifact);
     }

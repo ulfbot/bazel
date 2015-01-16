@@ -19,6 +19,19 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Actions;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.AnalysisUtils;
+import com.google.devtools.build.lib.analysis.CompilationHelper;
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.FileProvider;
+import com.google.devtools.build.lib.analysis.LicensesProvider;
+import com.google.devtools.build.lib.analysis.LicensesProvider.TargetLicense;
+import com.google.devtools.build.lib.analysis.MiddlemanProvider;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.Runfiles;
+import com.google.devtools.build.lib.analysis.RunfilesProvider;
+import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
@@ -26,19 +39,6 @@ import com.google.devtools.build.lib.packages.License;
 import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.AnalysisUtils;
-import com.google.devtools.build.lib.view.CompilationHelper;
-import com.google.devtools.build.lib.view.ConfiguredTarget;
-import com.google.devtools.build.lib.view.FileProvider;
-import com.google.devtools.build.lib.view.LicensesProvider;
-import com.google.devtools.build.lib.view.LicensesProvider.TargetLicense;
-import com.google.devtools.build.lib.view.MiddlemanProvider;
-import com.google.devtools.build.lib.view.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.view.RuleConfiguredTargetBuilder;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.Runfiles;
-import com.google.devtools.build.lib.view.RunfilesProvider;
-import com.google.devtools.build.lib.view.TransitiveInfoCollection;
 
 import java.util.List;
 
@@ -64,14 +64,13 @@ public class CcToolchain implements RuleConfiguredTargetFactory {
     final PathFragment runtimeSolibDir = ruleContext.getConfiguration()
         .getBinFragment().getRelative(runtimeSolibDirBase);
 
+    CppConfiguration cppConfiguration = ruleContext.getFragment(CppConfiguration.class);
     // Static runtime inputs.
     TransitiveInfoCollection staticRuntimeLibDep = selectDep(ruleContext, "static_runtime_libs",
-        ruleContext.getConfiguration().getFragment(CppConfiguration.class)
-            .getStaticRuntimeLibsLabel());
+        cppConfiguration.getStaticRuntimeLibsLabel());
     final NestedSet<Artifact> staticRuntimeLinkInputs;
     final Artifact staticRuntimeLinkMiddleman;
-    if (ruleContext.getConfiguration().getFragment(CppConfiguration.class)
-        .supportsEmbeddedRuntimes()) {
+    if (cppConfiguration.supportsEmbeddedRuntimes()) {
       staticRuntimeLinkInputs = staticRuntimeLibDep
           .getProvider(FileProvider.class)
           .getFilesToBuild();
@@ -95,12 +94,10 @@ public class CcToolchain implements RuleConfiguredTargetFactory {
 
     // Dynamic runtime inputs.
     TransitiveInfoCollection dynamicRuntimeLibDep = selectDep(ruleContext, "dynamic_runtime_libs",
-        ruleContext.getConfiguration().getFragment(CppConfiguration.class)
-            .getDynamicRuntimeLibsLabel());
+        cppConfiguration.getDynamicRuntimeLibsLabel());
     final NestedSet<Artifact> dynamicRuntimeLinkInputs;
     final Artifact dynamicRuntimeLinkMiddleman;
-    if (ruleContext.getConfiguration().getFragment(CppConfiguration.class)
-        .supportsEmbeddedRuntimes()) {
+    if (cppConfiguration.supportsEmbeddedRuntimes()) {
       NestedSetBuilder<Artifact> dynamicRuntimeLinkInputsBuilder = NestedSetBuilder.stableOrder();
       for (Artifact artifact : dynamicRuntimeLibDep
           .getProvider(FileProvider.class).getFilesToBuild()) {
@@ -142,6 +139,8 @@ public class CcToolchain implements RuleConfiguredTargetFactory {
     }
     final CppCompilationContext context = contextBuilder.build();
     boolean supportsParamFiles = ruleContext.attributes().get("supports_param_files", BOOLEAN);
+    boolean supportsHeaderParsing =
+        ruleContext.attributes().get("supports_header_parsing", BOOLEAN);
 
     CcToolchainProvider provider = new CcToolchainProvider(
         Preconditions.checkNotNull(ruleContext.getFragment(CppConfiguration.class)),
@@ -159,7 +158,8 @@ public class CcToolchain implements RuleConfiguredTargetFactory {
         dynamicRuntimeLinkMiddleman,
         runtimeSolibDir,
         context,
-        supportsParamFiles);
+        supportsParamFiles,
+        supportsHeaderParsing);
     RuleConfiguredTargetBuilder builder =
         new RuleConfiguredTargetBuilder(ruleContext)
             .add(CcToolchainProvider.class, provider)

@@ -26,13 +26,13 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Executor;
 import com.google.devtools.build.lib.actions.ResourceSet;
 import com.google.devtools.build.lib.actions.Root;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.rules.cpp.LinkerInputs.LibraryToLink;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
 
 import java.io.IOException;
 
@@ -170,7 +170,7 @@ public final class SolibSymlinkAction extends AbstractAction {
     // Ignore libraries that are already represented by the symlinks.
     Root root = configuration.getBinDirectory();
     Artifact symlink = ruleContext.getAnalysisEnvironment().getDerivedArtifact(symlinkName, root);
-    ruleContext.getAnalysisEnvironment().registerAction(
+    ruleContext.registerAction(
         new SolibSymlinkAction(ruleContext.getActionOwner(), library, symlink));
     return LinkerInputs.solibLibraryToLink(symlink, library);
   }

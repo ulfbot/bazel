@@ -306,14 +306,6 @@ public class FileSystemUtils {
     return new PathFragment(System.getProperty("user.dir", "/"));
   }
 
-  /**
-   * Return the default temp directory as expressed by the System property
-   * 'java.io.tmpdir'.
-   */
-  public static Path getTempDirectory(FileSystem fs) {
-    return fs.getPath(System.getProperty("java.io.tmpdir", "/tmp"));
-  }
-
   /****************************************************************************
    * Path FileSystem mutating operations.
    */
@@ -609,7 +601,7 @@ public class FileSystemUtils {
         newLink.createSymbolicLink(entry.readSymbolicLink());
       } else {
         Path newEntry = to.getChild(entry.getBaseName());
-          copyFile(entry, newEntry);
+        copyFile(entry, newEntry);
       }
     }
   }

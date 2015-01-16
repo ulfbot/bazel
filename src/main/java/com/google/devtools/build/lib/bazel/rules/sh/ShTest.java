@@ -14,11 +14,11 @@
 package com.google.devtools.build.lib.bazel.rules.sh;
 
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.actions.FileWriteAction;
 import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.actions.FileWriteAction;
 
 /**
  * Implementation for sh_test rules.
@@ -42,12 +42,11 @@ public class ShTest extends ShBinary implements RuleConfiguredTargetFactory {
         .get(BazelShRuleClasses.SYSTEM_BASH_VERSION).execPath;
 
     // Generate the runner contents.
-    String runnerContents = new StringBuilder()
-        .append("#!/bin/bash\n")
-        .append(bashPath + " \"" + src.getRootRelativePath().getPathString() + "\" \"$@\"\n")
-        .toString();
+    String runnerContents =
+        "#!/bin/bash\n"
+        + bashPath + " \"" + src.getRootRelativePath().getPathString() + "\" \"$@\"\n";
 
-    ruleContext.getAnalysisEnvironment().registerAction(
+    ruleContext.registerAction(
         new FileWriteAction(ruleContext.getActionOwner(), testRunner, runnerContents, true));
     return testRunner;
   }

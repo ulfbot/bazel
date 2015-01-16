@@ -16,18 +16,18 @@ package com.google.devtools.build.lib.rules.cpp;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.actions.AbstractAction;
-import com.google.devtools.build.lib.actions.ActionExecutionContext;
-import com.google.devtools.build.lib.actions.ActionExecutionException;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Executor;
 import com.google.devtools.build.lib.actions.ResourceSet;
+import com.google.devtools.build.lib.analysis.actions.AbstractFileWriteAction;
+import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.util.Fingerprint;
-import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -36,7 +36,7 @@ import java.util.List;
  * Creates C++ module map artifact genfiles. These are then passed to Clang to
  * do dependency checking.
  */
-public class CppModuleMapAction extends AbstractAction {
+public class CppModuleMapAction extends AbstractFileWriteAction {
 
   private static final String GUID = "4f407081-1951-40c1-befc-d6b4daff5de3";
 
@@ -47,66 +47,78 @@ public class CppModuleMapAction extends AbstractAction {
   private final ImmutableList<Artifact> privateHeaders;
   private final ImmutableList<Artifact> publicHeaders;
   private final ImmutableList<CppModuleMap> dependencies;
+  private final ImmutableList<PathFragment> additionalExportedHeaders;
+  private final boolean compiledModule;
 
   public CppModuleMapAction(ActionOwner owner, CppModuleMap cppModuleMap,
       Iterable<Artifact> privateHeaders, Iterable<Artifact> publicHeaders,
-      Iterable<CppModuleMap> dependencies) {
-    super(owner, ImmutableList.<Artifact>of(), ImmutableList.of(cppModuleMap.getArtifact()));
+      Iterable<CppModuleMap> dependencies, Iterable<PathFragment> additionalExportedHeaders,
+      boolean compiledModule) {
+    super(owner, ImmutableList.<Artifact>of(), cppModuleMap.getArtifact(),
+        /*makeExecutable=*/false);
     this.cppModuleMap = cppModuleMap;
     this.privateHeaders = ImmutableList.copyOf(privateHeaders);
     this.publicHeaders = ImmutableList.copyOf(publicHeaders);
     this.dependencies = ImmutableList.copyOf(dependencies);
+    this.additionalExportedHeaders = ImmutableList.copyOf(additionalExportedHeaders);
+    this.compiledModule = compiledModule;
   }
 
   @Override
-  public void execute(
-      ActionExecutionContext actionExecutionContext) throws ActionExecutionException {
-    StringBuilder content = new StringBuilder();
-    PathFragment fragment = cppModuleMap.getArtifact().getExecPath();
-    int segmentsToExecPath = fragment.segmentCount() - 1;
+  public DeterministicWriter newDeterministicWriter(EventHandler eventHandler, Executor executor)  {
+    return new DeterministicWriter() {
+      @Override
+      public void writeOutputFile(OutputStream out) throws IOException {
+        StringBuilder content = new StringBuilder();
+        PathFragment fragment = cppModuleMap.getArtifact().getExecPath();
+        int segmentsToExecPath = fragment.segmentCount() - 1;
 
-    content.append("module \"" + cppModuleMap.getName() + "\" {\n");
-    for (Artifact artifact : privateHeaders) {
-      if (!CppFileTypes.CPP_TEXTUAL_INCLUDE.matches(artifact.getExecPath())) {
-        content.append("  private header \"" + Strings.repeat("../", segmentsToExecPath)
-            + artifact.getExecPath() + "\"\n");
-      } else {
-        content.append("  exclude header \"" + Strings.repeat("../", segmentsToExecPath)
-            + artifact.getExecPath() + "\"\n");        
+        // For details about the different header types, see:
+        // http://clang.llvm.org/docs/Modules.html#header-declaration
+        String leadingPeriods = Strings.repeat("../", segmentsToExecPath);
+        content.append("module \"").append(cppModuleMap.getName()).append("\" {\n");
+        content.append("  export *\n");
+        for (Artifact artifact : privateHeaders) {
+          appendHeader(content, "private", artifact.getExecPath(), leadingPeriods,
+              /*canCompile=*/true);
+        }
+        for (Artifact artifact : publicHeaders) {
+          appendHeader(content, "", artifact.getExecPath(), leadingPeriods, /*canCompile=*/true);
+        }
+        for (PathFragment additionalExportedHeader : additionalExportedHeaders) {
+          appendHeader(content, "", additionalExportedHeader, leadingPeriods, /*canCompile*/false);
+        }
+        for (CppModuleMap dep : dependencies) {
+          content.append("  use \"").append(dep.getName()).append("\"\n");
+        }
+        content.append("}");
+        for (CppModuleMap dep : dependencies) {
+          content.append("\nextern module \"")
+              .append(dep.getName())
+              .append("\" \"")
+              .append(leadingPeriods)
+              .append(dep.getArtifact().getExecPath())
+              .append("\"");
+        }
+        out.write(content.toString().getBytes(StandardCharsets.ISO_8859_1));
       }
-    }
-    for (Artifact artifact : publicHeaders) {
-      if (!CppFileTypes.CPP_TEXTUAL_INCLUDE.matches(artifact.getExecPath())) {
-        content.append("  header \""
-            + Strings.repeat("../", segmentsToExecPath)
-            + artifact.getExecPath() + "\"\n");
-      } else {
-        content.append("  exclude header \"" + Strings.repeat("../", segmentsToExecPath)
-            + artifact.getExecPath() + "\"\n");
-      }
-    }
-    for (CppModuleMap dep : dependencies) {
-      content.append("  use \"" + dep.getName() + "\"\n");
-    }
-    content.append("}");
-    for (CppModuleMap dep : dependencies) {
-      content.append("\nextern module \"" + dep.getName() + "\" \""
-          + Strings.repeat("../", segmentsToExecPath)
-          + dep.getArtifact().getExecPath() + "\"");
-    }
-
-    try {
-      FileSystemUtils.writeIsoLatin1(cppModuleMap.getArtifact().getPath(), content.toString());
-    } catch (IOException e) {
-      throw new ActionExecutionException("failed to create C++ module map '"
-          + cppModuleMap.getArtifact().prettyPrint() + "' due to I/O error: " + e.getMessage(),
-          e, this, false);
-    }
+    };
   }
-
-  @Override
-  public String describeStrategy(Executor executor) {
-    return "local";
+  
+  private void appendHeader(StringBuilder content, String visibilitySpecifier, PathFragment path,
+      String leadingPeriods, boolean canCompile) {
+    content.append("  ");
+    if (!visibilitySpecifier.isEmpty()) {
+      content.append(visibilitySpecifier).append(" ");
+    }
+    if (!canCompile || !shouldCompileHeader(path)) {
+      content.append("textual ");
+    }
+    content.append("header \"").append(leadingPeriods).append(path).append("\"\n");
+  }
+  
+  private boolean shouldCompileHeader(PathFragment path) {
+    return compiledModule && !CppFileTypes.CPP_TEXTUAL_INCLUDE.matches(path);
   }
 
   @Override
@@ -130,13 +142,13 @@ public class CppModuleMapAction extends AbstractAction {
     for (CppModuleMap dep : dependencies) {
       f.addPath(dep.getArtifact().getExecPath());
     }
-    f.addPath(cppModuleMap.getArtifact().getPath());
+    f.addPath(cppModuleMap.getArtifact().getExecPath());
     f.addString(cppModuleMap.getName());
     return f.hexDigest();
   }
 
   @Override
-  public ResourceSet estimateResourceConsumption(Executor executor) {
+  public ResourceSet estimateResourceConsumptionLocal() {
     return new ResourceSet(/*memoryMb=*/0, /*cpuUsage=*/0, /*ioUsage=*/0.02);
   }
 
@@ -148,6 +160,11 @@ public class CppModuleMapAction extends AbstractAction {
   @VisibleForTesting
   public Collection<Artifact> getPrivateHeaders() {
     return privateHeaders;
+  }
+  
+  @VisibleForTesting
+  public ImmutableList<PathFragment> getAdditionalExportedHeaders() {
+    return additionalExportedHeaders;
   }
 
   @VisibleForTesting

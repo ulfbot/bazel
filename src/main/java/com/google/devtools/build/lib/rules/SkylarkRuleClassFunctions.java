@@ -30,6 +30,8 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.RunUnder;
 import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition;
@@ -69,11 +71,10 @@ import com.google.devtools.build.lib.syntax.SkylarkFunction;
 import com.google.devtools.build.lib.syntax.SkylarkFunction.SimpleSkylarkFunction;
 import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.syntax.UserDefinedFunction;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
-import com.google.devtools.build.lib.view.config.RunUnder;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
 
 /**
  * A helper class to provide an easier API for Skylark rule definitions.
@@ -122,11 +123,11 @@ public class SkylarkRuleClassFunctions {
   private static LoadingCache<String, Label> labelCache =
       CacheBuilder.newBuilder().build(new CacheLoader<String, Label>() {
     @Override
-    public Label load(String from) {
+    public Label load(String from) throws Exception {
       try {
         return Label.parseAbsolute(from);
       } catch (Label.SyntaxException e) {
-        throw new IllegalArgumentException(from);
+        throw new Exception(from);
       }
     }
   });
@@ -134,19 +135,25 @@ public class SkylarkRuleClassFunctions {
   // TODO(bazel-team): Remove the code duplication (BaseRuleClasses and this class).
   private static final RuleClass baseRule =
       new RuleClass.Builder("$base_rule", RuleClassType.ABSTRACT, true)
-          .add(attr("deprecation", STRING).nonconfigurable().value(DEPRECATION))
+          .add(attr("deprecation", STRING).value(DEPRECATION)
+              .nonconfigurable("Used in core loading phase logic with no access to configs"))
           .add(attr("expect_failure", STRING))
           .add(attr("generator_name", STRING).undocumented("internal"))
           .add(attr("generator_function", STRING).undocumented("internal"))
-          .add(attr("tags", STRING_LIST).orderIndependent().nonconfigurable().taggable())
-          .add(attr("testonly", BOOLEAN).nonconfigurable().value(TEST_ONLY))
-          .add(attr("visibility", NODEP_LABEL_LIST).orderIndependent().nonconfigurable().cfg(HOST))
+          .add(attr("tags", STRING_LIST).orderIndependent().taggable()
+              .nonconfigurable("low-level attribute, used in TargetUtils without configurations"))
+          .add(attr("testonly", BOOLEAN).value(TEST_ONLY)
+              .nonconfigurable("policy decision: should be consistent across configurations"))
+          .add(attr("visibility", NODEP_LABEL_LIST).orderIndependent().cfg(HOST)
+              .nonconfigurable("special attribute integrated more deeply into Bazel's core logic"))
           .build();
 
   private static final RuleClass testBaseRule =
       new RuleClass.Builder("$test_base_rule", RuleClassType.ABSTRACT, true, baseRule)
-          .add(attr("size", STRING).value("medium").taggable().nonconfigurable())
-          .add(attr("timeout", STRING).taggable().nonconfigurable().value(
+          .add(attr("size", STRING).value("medium").taggable()
+              .nonconfigurable("used in loading phase rule validation logic"))
+          .add(attr("timeout", STRING).taggable()
+              .nonconfigurable("used in loading phase rule validation logic").value(
               new Attribute.ComputedDefault() {
                 @Override
                 public Object getDefault(AttributeMap rule) {
@@ -160,11 +167,14 @@ public class SkylarkRuleClassFunctions {
                   return "illegal";
                 }
               }))
-          .add(attr("flaky", BOOLEAN).value(false).taggable().nonconfigurable())
+          .add(attr("flaky", BOOLEAN).value(false).taggable()
+              .nonconfigurable("taggable - called in Rule.getRuleTags"))
           .add(attr("shard_count", INTEGER).value(-1))
           .add(attr("env", STRING_LIST).value(ImmutableList.of("corp"))
-               .undocumented("Deprecated").taggable().nonconfigurable())
-          .add(attr("local", BOOLEAN).value(false).taggable().nonconfigurable())
+              .undocumented("Deprecated").taggable()
+              .nonconfigurable("used in test filtering with raw Rule instances"))
+          .add(attr("local", BOOLEAN).value(false).taggable()
+              .nonconfigurable("policy decision: this should be consistent across configurations"))
           .add(attr("$test_runtime", LABEL_LIST).cfg(HOST).value(ImmutableList.of(
               labelCache.getUnchecked("//tools/test:runtime"))))
           .add(attr(":run_under", LABEL).cfg(DATA).value(RUN_UNDER))
@@ -236,7 +246,9 @@ public class SkylarkRuleClassFunctions {
           }
           if (arguments.containsKey("executable") && (Boolean) arguments.get("executable")) {
             builder.addOrOverrideAttribute(
-                attr("$is_executable", BOOLEAN).nonconfigurable().value(true).build());
+                attr("$is_executable", BOOLEAN).value(true)
+                    .nonconfigurable("Called from RunCommand.isExecutable, which takes a Target")
+                    .build());
             builder.setOutputsDefaultExecutable();
           }
 
@@ -298,27 +310,33 @@ public class SkylarkRuleClassFunctions {
     }
   }
 
-  @SkylarkBuiltin(name = "label", doc = "Creates a label referring to a BUILD target. Use "
+  @SkylarkBuiltin(name = "Label", doc = "Creates a Label referring to a BUILD target. Use "
       + "this function only when you want to give a default value for the label attributes. "
-      + "Example: <br><pre class=code>label(\"//tools:default\")</pre>",
+      + "Example: <br><pre class=code>Label(\"//tools:default\")</pre>",
       returnType = Label.class,
-      mandatoryParams = {@Param(name = "label", type = String.class, doc = "the label string")})
-  private static final SkylarkFunction label = new SimpleSkylarkFunction("label") {
+      mandatoryParams = {@Param(name = "label_string", type = String.class,
+            doc = "the label string")})
+  private static final SkylarkFunction label = new SimpleSkylarkFunction("Label") {
         @Override
         public Object call(Map<String, Object> arguments, Location loc) throws EvalException,
             ConversionException {
-          return labelCache.getUnchecked((String) arguments.get("label"));
+          String labelString = (String) arguments.get("label_string");
+          try {
+            return labelCache.get(labelString);
+          } catch (ExecutionException e) {
+            throw new EvalException(loc, "Illegal absolute label syntax: " + labelString);
+          }
         }
       };
 
-  @SkylarkBuiltin(name = "filetype",
+  @SkylarkBuiltin(name = "FileType",
       doc = "Creates a file filter from a list of strings. For example, to match files ending "
-      + "with .cc or .cpp, use: <pre class=code>filetype([\".cc\", \".cpp\"])</pre>",
+      + "with .cc or .cpp, use: <pre class=code>FileType([\".cc\", \".cpp\"])</pre>",
       returnType = SkylarkFileType.class,
       mandatoryParams = {
       @Param(name = "types", type = SkylarkList.class, generic1 = String.class,
           doc = "a list of the accepted file extensions")})
-  private static final SkylarkFunction fileType = new SimpleSkylarkFunction("filetype") {
+  private static final SkylarkFunction fileType = new SimpleSkylarkFunction("FileType") {
         @Override
         public Object call(Map<String, Object> arguments, Location loc) throws EvalException,
             ConversionException {
@@ -328,10 +346,11 @@ public class SkylarkRuleClassFunctions {
 
   @SkylarkBuiltin(name = "to_proto",
       doc = "Creates a text message from the struct parameter. This method only works if all "
-          + "struct elements (recursively) are strings, ints, other structs or a list of these "
-          + "types. Quotes and new lines in strings are escaped. "
+          + "struct elements (recursively) are strings, ints, booleans, other structs or a "
+          + "list of these types. Quotes and new lines in strings are escaped. "
           + "Examples:<br><pre class=code>"
           + "struct(key=123).to_proto()\n# key: 123\n\n"
+          + "struct(key=True).to_proto()\n# key: true\n\n"
           + "struct(key=[1, 2, 3]).to_proto()\n# key: 1\n# key: 2\n# key: 3\n\n"
           + "struct(key='text').to_proto()\n# key: \"text\"\n\n"
           + "struct(key=struct(inner_key='text')).to_proto()\n"
@@ -341,7 +360,7 @@ public class SkylarkRuleClassFunctions {
           + "struct(key=struct(inner_key=struct(inner_inner_key='text'))).to_proto()\n"
           + "# key {\n#    inner_key {\n#     inner_inner_key: \"text\"\n#   }\n# }\n</pre>",
       objectType = SkylarkClassObject.class, returnType = String.class)
-  private static final SkylarkFunction textMessage = new SimpleSkylarkFunction("to_proto") {
+  private static final SkylarkFunction toProto = new SimpleSkylarkFunction("to_proto") {
     @Override
     public Object call(Map<String, Object> arguments, Location loc) throws EvalException,
         ConversionException {
@@ -368,9 +387,13 @@ public class SkylarkRuleClassFunctions {
         print(sb, key + ": \"" + escape((String) value) + "\"", indent);
       } else if (value instanceof Integer) {
         print(sb, key + ": " + value, indent);
+      } else if (value instanceof Boolean) {
+        // We're relying on the fact that Java converts Booleans to Strings in the same way
+        // as the protocol buffers do.
+        print(sb, key + ": " + value, indent);
       } else {
         throw new EvalException(loc,
-            "Invalid text format, expected a struct, a string or an int but got a "
+            "Invalid text format, expected a struct, a string, a bool, or an int but got a "
             + EvalUtils.getDatatypeName(value) + " for " + container + " '" + key + "'");
       }
     }

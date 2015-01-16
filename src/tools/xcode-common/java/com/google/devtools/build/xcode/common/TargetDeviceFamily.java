@@ -14,12 +14,13 @@
 
 package com.google.devtools.build.xcode.common;
 
-import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
+import com.google.common.collect.ImmutableBiMap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -28,7 +29,7 @@ import java.util.Set;
  * Possible values in the {@code TARGETED_DEVICE_FAMILY} build setting.
  */
 public enum TargetDeviceFamily {
-  IPAD("ipad"), IPHONE("iphone");
+  IPAD, IPHONE;
 
   /**
    * Contains the values of the UIDeviceFamily plist info setting for each valid set of
@@ -42,14 +43,67 @@ public enum TargetDeviceFamily {
               ImmutableList.of(1, 2))
           .build();
 
-  private final String nameInRule;
-
-  TargetDeviceFamily(String nameInRule) {
-    this.nameInRule = Preconditions.checkNotNull(nameInRule);
+  /**
+   * Returns the name of the family as it appears in build rules.
+   */
+  public String getNameInRule() {
+    return BY_NAME_IN_RULE.get(this);
   }
 
-  public String getNameInRule() {
-    return nameInRule;
+  /**
+   * Returns the name of family which should be used in the bundlemerge control proto.
+   */
+  public String getBundleMergeName() {
+    return BY_BUNDLE_MERGE_NAME.get(this);
+  }
+
+  private static final ImmutableBiMap<TargetDeviceFamily, String> BY_NAME_IN_RULE =
+      ImmutableBiMap.<TargetDeviceFamily, String>of(IPAD, "ipad", IPHONE, "iphone");
+
+  private static final ImmutableBiMap<TargetDeviceFamily, String> BY_BUNDLE_MERGE_NAME =
+      ImmutableBiMap.<TargetDeviceFamily, String>of(IPAD, "IPAD", IPHONE, "IPHONE");
+
+  private static Set<TargetDeviceFamily> fromNames(
+      Iterable<String> names, Map<String, TargetDeviceFamily> mapping) {
+    Set<TargetDeviceFamily> families = EnumSet.noneOf(TargetDeviceFamily.class);
+    for (String name : names) {
+      TargetDeviceFamily family = mapping.get(name);
+      if (family == null) {
+        throw new InvalidFamilyNameException(name);
+      }
+      if (!families.add(family)) {
+        throw new RepeatedFamilyNameException(name);
+      }
+    }
+    return families;
+  }
+
+  /**
+   * Converts a sequence containing the strings returned by {@link #getBundleMergeName()} to a set
+   * of instances of this enum.
+   *
+   * <p>If there are multiple items in the returned set, they are in enumeration order.
+   *
+   * @param names the names of the families
+   * @throws InvalidFamilyNameException if some family name in the sequence was not recognized
+   * @throws RepeatedFamilyNameException if some family name appeared in the sequence twice
+   */
+  public static Set<TargetDeviceFamily> fromBundleMergeNames(Iterable<String> names) {
+    return fromNames(names, BY_BUNDLE_MERGE_NAME.inverse());
+  }
+
+  /**
+   * Converts a sequence containing the strings returned by {@link #getNameInRule()} to a set of
+   * instances of this enum.
+   *
+   * <p>If there are multiple items in the returned set, they are in enumeration order.
+   *
+   * @param names the names of the families
+   * @throws InvalidFamilyNameException if some family name in the sequence was not recognized
+   * @throws RepeatedFamilyNameException if some family name appeared in the sequence twice
+   */
+  public static Set<TargetDeviceFamily> fromNamesInRule(Iterable<String> names) {
+    return fromNames(names, BY_NAME_IN_RULE.inverse());
   }
 
   /**

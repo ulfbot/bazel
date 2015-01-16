@@ -21,7 +21,6 @@ import com.google.devtools.build.lib.events.EventKind;
 import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.util.BlazeClock;
 import com.google.devtools.build.lib.vfs.FileSystem;
-import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 
@@ -47,7 +46,8 @@ public abstract class FoundationTestCase extends ChattyAssertsTestCase {
   protected Reporter reporter;
   protected EventCollector eventCollector;
 
-  private FileSystem fileSystem;
+  private Scratch scratch;
+
 
   // Individual tests can opt-out of this handler if they expect an error, by
   // calling reporter.removeHandler(failFastHandler).
@@ -70,7 +70,7 @@ public abstract class FoundationTestCase extends ChattyAssertsTestCase {
   @Override
   protected void setUp() throws Exception {
     super.setUp();
-    fileSystem = createFileSystem();
+    scratch = new Scratch(createFileSystem());
     outputBase = scratchDir("/usr/local/google/_blaze_jrluser/FAKEMD5/");
     rootDirectory = scratchDir("/" + TestConstants.TEST_WORKSPACE_DIRECTORY);
     copySkylarkFilesIfExist();
@@ -81,21 +81,26 @@ public abstract class FoundationTestCase extends ChattyAssertsTestCase {
   }
 
   /*
-   * Creates the file system; override to inject FS behavior. 
+   * Creates the file system; override to inject FS behavior.
    */
   protected FileSystem createFileSystem() {
      return new InMemoryFileSystem(BlazeClock.instance());
   }
-    
+
 
   private void copySkylarkFilesIfExist() throws IOException {
-    File rulesDir = new File("devtools/blaze/rules/staging");
+    copySkylarkFilesIfExist("devtools/blaze/rules/staging", "devtools/blaze/rules");
+    copySkylarkFilesIfExist("devtools/blaze/bazel/base_workspace/tools/build_rules", "rules");
+  }
+
+  private void copySkylarkFilesIfExist(String from, String to) throws IOException {
+    File rulesDir = new File(from);
     if (rulesDir.exists() && rulesDir.isDirectory()) {
       for (String fileName : rulesDir.list()) {
-        File file = new File("devtools/blaze/rules/staging/" + fileName);
+        File file = new File(from + "/" + fileName);
         if (file.isFile() && fileName.endsWith(".bzl")) {
           String context = loadFile(file);
-          Path path = rootDirectory.getRelative("devtools/blaze/rules/" + fileName);
+          Path path = rootDirectory.getRelative(to + "/" + fileName);
           if (path.exists()) {
             overwriteScratchFile(path.getPathString(), context);
           } else {
@@ -120,7 +125,7 @@ public abstract class FoundationTestCase extends ChattyAssertsTestCase {
    * each testFoo method in junit sees a fresh filesystem.
    */
   protected FileSystem scratchFS() {
-    return fileSystem;
+    return scratch.getFileSystem();
   }
 
   /**
@@ -130,9 +135,7 @@ public abstract class FoundationTestCase extends ChattyAssertsTestCase {
    */
   protected Path scratchFile(String pathName, String... lines)
       throws IOException {
-    Path newFile = scratchFile(scratchFS(), pathName, lines);
-    newFile.setLastModifiedTime(-1L);
-    return newFile;
+    return scratch.file(pathName, lines);
   }
 
   /**
@@ -140,20 +143,14 @@ public abstract class FoundationTestCase extends ChattyAssertsTestCase {
    * exists.
    */
   protected Path overwriteScratchFile(String pathName, String... lines) throws IOException {
-    Path oldFile = scratchFS().getPath(pathName);
-    long newMTime = oldFile.exists() ? oldFile.getLastModifiedTime() + 1 : -1;
-    oldFile.delete();
-    Path newFile = scratchFile(scratchFS(), pathName, lines);
-    newFile.setLastModifiedTime(newMTime);
-    return newFile;
+    return scratch.overwriteFile(pathName, lines);
   }
 
   /**
    * Deletes the specified scratch file, using the same specification as {@link Path#delete}.
    */
   protected boolean deleteScratchFile(String pathName) throws IOException {
-    Path file = scratchFS().getPath(pathName);
-    return file.delete();
+    return scratch.deleteFile(pathName);
   }
 
   /**
@@ -163,9 +160,7 @@ public abstract class FoundationTestCase extends ChattyAssertsTestCase {
    */
   protected Path scratchFile(FileSystem fs, String pathName, String... lines)
       throws IOException {
-    Path file = newScratchFile(fs, pathName);
-    FileSystemUtils.writeContentAsLatin1(file, linesAsString(lines));
-    return file;
+    return scratch.file(fs, pathName, lines);
   }
 
   /**
@@ -175,49 +170,14 @@ public abstract class FoundationTestCase extends ChattyAssertsTestCase {
    */
   protected Path scratchFile(FileSystem fs, String pathName, byte[] content)
       throws IOException {
-    Path file = newScratchFile(fs, pathName);
-    FileSystemUtils.writeContent(file, content);
-    return file;
-  }
-
-  private Path newScratchFile(FileSystem fs, String pathName) throws IOException {
-    Path file = fs.getPath(pathName);
-    Path parentDir = file.getParentDirectory();
-    if (!parentDir.exists()) {
-      FileSystemUtils.createDirectoryAndParents(parentDir);
-    }
-    if (file.exists()) {
-      throw new IOException("Could not create scratch file (file exists) "
-          + pathName);
-    }
-    return file;
+    return scratch.file(fs, pathName, content);
   }
 
   /**
    * Create a directory in the scratch filesystem, with the given path name.
    */
-  protected Path scratchDir(String pathName) throws IOException {
-    Path dir = scratchFS().getPath(pathName);
-    if (!dir.exists()) {
-      FileSystemUtils.createDirectoryAndParents(dir);
-    }
-    if (!dir.isDirectory()) {
-      throw new IOException("Exists, but is not a directory: " + pathName);
-    }
-    return dir;
-  }
-
-  /**
-   * Converts the lines into a String with linebreaks. Useful for creating
-   * in-memory input for a file, for example.
-   */
-  private static String linesAsString(String... lines) {
-    StringBuilder builder = new StringBuilder();
-    for (String line : lines) {
-      builder.append(line);
-      builder.append('\n');
-    }
-    return builder.toString();
+  public Path scratchDir(String pathName) throws IOException {
+    return scratch.dir(pathName);
   }
 
   /**

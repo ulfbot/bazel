@@ -1,4 +1,15 @@
-# README
+*Bazel is very much a work in progress. We'd love if you tried it out, but there
+are many rough edges. Please feel free to
+[give us feedback](https://groups.google.com/forum/#!forum/bazel-discuss)!*
+
+# Bazel
+
+*{Fast, Correct} - Choose two*
+
+Bazel is an build tool that builds code quickly and reliably.
+It executes as few build steps as possible by tracking dependencies and outputs,
+controls the build environment to keep builds hermetic, and uses its
+knowledge of dependencies to parallelize builds.
 
 This README file contains instructions for building and running Bazel.
 
@@ -11,7 +22,7 @@ Supported platforms:
 
 Java:
 
-* Java JDK 7 or later
+* Java JDK 8 or later
 
 ## Getting Bazel
 
@@ -74,6 +85,9 @@ Build a sample Java application:
         $ cp -R $HOME/bazel/base_workspace $HOME/my_workspace
         $ cd $HOME/my_workspace
         $ $HOME/bazel/output/bazel build //examples/java:hello-world
+
+_Note: on OS X, you must specify \-\-cpu=darwin to build Java programs (e.g.,
+bazel build --cpu=darwin //examples/java:hello-world)._
 
 The build output is located in `$HOME/my_workspace/bazel-bin/examples/java/`.
 

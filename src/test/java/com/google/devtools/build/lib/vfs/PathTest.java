@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.vfs;
 
+import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertSame;
@@ -22,7 +23,6 @@ import static org.junit.Assert.fail;
 import com.google.common.collect.Lists;
 import com.google.common.testing.EqualsTester;
 import com.google.common.testing.GcFinalization;
-import com.google.devtools.build.lib.testutil.MoreAsserts;
 import com.google.devtools.build.lib.util.BlazeClock;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 
@@ -111,13 +111,6 @@ public class PathTest {
   }
 
   @Test
-  public void testWindowsPath() {
-    Path p = filesystem.getPath("C:/foo/bar");
-    assertEquals("C:/foo/bar", p.getPathString());
-    assertEquals("C:/foo/bar", p.toString());
-  }
-
-  @Test
   public void testGetChildWorks() {
     assertGetChildWorks("second");
     assertGetChildWorks("...");
@@ -185,15 +178,6 @@ public class PathTest {
   }
 
   @Test
-  public void testAsFragmentWindows() {
-    assertAsFragmentWorks("C:/");
-    assertAsFragmentWorks("C://");
-    assertAsFragmentWorks("C:/first");
-    assertAsFragmentWorks("C:/first/x/y");
-    assertAsFragmentWorks("C:/first/x/y.foo");
-  }
-
-  @Test
   public void testGetRelativeWithFragmentWorks() {
     Path dir = filesystem.getPath("/first/x");
     assertEquals("/first/x/y",
@@ -206,21 +190,6 @@ public class PathTest {
   }
 
   @Test
-  public void testGetRelativeWithFragmentWindows() {
-    Path dir = filesystem.getPath("C:/first/x");
-    assertEquals("C:/first/x/y",
-                 dir.getRelative(new PathFragment("y")).toString());
-    assertEquals("C:/first/x/x",
-                 dir.getRelative(new PathFragment("./x")).toString());
-    assertEquals("C:/first/y",
-                 dir.getRelative(new PathFragment("../y")).toString());
-    assertEquals("C:/first/y",
-        dir.getRelative(new PathFragment("../y")).toString());
-    assertEquals("C:/y",
-        dir.getRelative(new PathFragment("../../../y")).toString());
-  }
-
-  @Test
   public void testGetRelativeWithAbsoluteFragmentWorks() {
     Path root = filesystem.getPath("/first/x");
     assertEquals("/x/y",
@@ -228,22 +197,9 @@ public class PathTest {
   }
 
   @Test
-  public void testGetRelativeWithAbsoluteFragmentWindows() {
-    Path root = filesystem.getPath("C:/first/x");
-    assertEquals("C:/x/y",
-                 root.getRelative(new PathFragment("C:/x/y")).toString());
-  }
-
-  @Test
   public void testGetRelativeWithAbsoluteStringWorks() {
     Path root = filesystem.getPath("/first/x");
     assertEquals("/x/y", root.getRelative("/x/y").toString());
-  }
-
-  @Test
-  public void testGetRelativeWithAbsoluteStringWorksWindows() {
-    Path root = filesystem.getPath("C:/first/x");
-    assertEquals("C:/x/y", root.getRelative("C:/x/y").toString());
   }
 
   @Test
@@ -256,19 +212,11 @@ public class PathTest {
     Path ABC = filesystem.getPath("/ABC");
     List<Path> list = Lists.newArrayList(zzz, ZZZ, ABC, aBc, AbC, abc);
     Collections.sort(list);
-    MoreAsserts.assertContentsInOrder(list, ABC, AbC, ZZZ, aBc, abc, zzz);
+    assertThat(list).containsExactly(ABC, AbC, ZZZ, aBc, abc, zzz).inOrder();
   }
 
   @Test
   public void testParentOfRootIsRoot() {
-    assertSame(root, root.getRelative(".."));
-
-    assertSame(root.getRelative("dots"),
-               root.getRelative("broken/../../dots"));
-  }
-
-  @Test
-  public void testParentOfRootIsRootWindows() {
     assertSame(root, root.getRelative(".."));
 
     assertSame(root.getRelative("dots"),

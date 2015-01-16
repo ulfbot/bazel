@@ -21,12 +21,11 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Executor;
+import com.google.devtools.build.lib.analysis.BuildInfoHelper;
+import com.google.devtools.build.lib.analysis.WorkspaceStatusAction;
+import com.google.devtools.build.lib.analysis.actions.AbstractFileWriteAction;
 import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.pkgcache.PackageUpToDateChecker;
 import com.google.devtools.build.lib.util.Fingerprint;
-import com.google.devtools.build.lib.view.BuildInfoHelper;
-import com.google.devtools.build.lib.view.WorkspaceStatusAction;
-import com.google.devtools.build.lib.view.actions.AbstractFileWriteAction;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -75,20 +74,19 @@ public final class WriteBuildInfoHeaderAction extends AbstractFileWriteAction {
       Preconditions.checkState(writeVolatileInfo ^ writeStableInfo);
     }
     Preconditions.checkState(
-        output.forceConstantMetadata() == (writeVolatileInfo && !inputs.isEmpty()));
+        output.isConstantMetadata() == (writeVolatileInfo && !inputs.isEmpty()));
 
     this.writeVolatileInfo = writeVolatileInfo;
     this.writeStableInfo = writeStableInfo;
   }
 
   @Override
-  public void writeOutputFile(OutputStream out, EventHandler eventHandler,
-      Executor executor) throws IOException {
+  public DeterministicWriter newDeterministicWriter(EventHandler eventHandler, Executor executor)
+      throws IOException {
     WorkspaceStatusAction.Context context =
         executor.getContext(WorkspaceStatusAction.Context.class);
-    Writer writer = new OutputStreamWriter(out, UTF_8);
 
-    Map<String, WorkspaceStatusAction.Key> keys = new LinkedHashMap<>();
+    final Map<String, WorkspaceStatusAction.Key> keys = new LinkedHashMap<>();
     if (writeVolatileInfo) {
       keys.putAll(context.getVolatileKeys());
     }
@@ -97,38 +95,45 @@ public final class WriteBuildInfoHeaderAction extends AbstractFileWriteAction {
       keys.putAll(context.getStableKeys());
     }
 
-    Map<String, String> values = new LinkedHashMap<>();
+    final Map<String, String> values = new LinkedHashMap<>();
     for (Artifact valueFile : valueArtifacts) {
       values.putAll(WorkspaceStatusAction.parseValues(valueFile.getPath()));
     }
 
-    boolean redacted = valueArtifacts.isEmpty();
+    final boolean redacted = valueArtifacts.isEmpty();
 
-    for (Map.Entry<String, WorkspaceStatusAction.Key> key : keys.entrySet()) {
-      if (!key.getValue().isInLanguage("C++")) {
-        continue;
+    return new DeterministicWriter() {
+      @Override
+      public void writeOutputFile(OutputStream out) throws IOException {
+        Writer writer = new OutputStreamWriter(out, UTF_8);
+
+       for (Map.Entry<String, WorkspaceStatusAction.Key> key : keys.entrySet()) {
+          if (!key.getValue().isInLanguage("C++")) {
+            continue;
+          }
+
+          String value = redacted ? key.getValue().getRedactedValue()
+              : values.containsKey(key.getKey()) ? values.get(key.getKey())
+              : key.getValue().getDefaultValue();
+
+          switch (key.getValue().getType()) {
+            case VERBATIM:
+            case INTEGER:
+              break;
+
+            case STRING:
+              value = quote(value);
+              break;
+
+            default:
+              throw new IllegalStateException();
+          }
+          define(writer, key.getKey(), value);
+
+        }
+        writer.flush();
       }
-
-      String value = redacted ? key.getValue().getRedactedValue()
-          : values.containsKey(key.getKey()) ? values.get(key.getKey())
-          : key.getValue().getDefaultValue();
-
-      switch (key.getValue().getType()) {
-        case VERBATIM:
-        case INTEGER:
-          break;
-
-        case STRING:
-          value = quote(value);
-          break;
-
-        default:
-          throw new IllegalStateException();
-      }
-      define(writer, key.getKey(), value);
-
-    }
-    writer.flush();
+    };
   }
 
   @Override
@@ -141,7 +146,7 @@ public final class WriteBuildInfoHeaderAction extends AbstractFileWriteAction {
   }
 
   @Override
-  public boolean executeUnconditionally(PackageUpToDateChecker upToDateChecker) {
+  public boolean executeUnconditionally() {
     // Note: isVolatile must return true if executeUnconditionally can ever return true
     // for this instance.
     return isUnconditional();
@@ -153,7 +158,7 @@ public final class WriteBuildInfoHeaderAction extends AbstractFileWriteAction {
   }
 
   private boolean isUnconditional() {
-    // Because of special handling in the MetadataCache, changed volatile build
+    // Because of special handling in the MetadataHandler, changed volatile build
     // information does not trigger relinking of all libraries that have
     // linkstamps. But we do want to regenerate the header in case libraries are
     // relinked because of other reasons.

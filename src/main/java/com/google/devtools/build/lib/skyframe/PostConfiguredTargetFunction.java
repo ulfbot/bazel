@@ -19,16 +19,26 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Action;
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.DependencyResolver.Dependency;
+import com.google.devtools.build.lib.analysis.LabelAndConfiguration;
+import com.google.devtools.build.lib.analysis.TargetAndConfiguration;
+import com.google.devtools.build.lib.analysis.config.ConfigMatchingProvider;
+import com.google.devtools.build.lib.packages.Attribute;
+import com.google.devtools.build.lib.packages.RawAttributeMapper;
+import com.google.devtools.build.lib.packages.Rule;
+import com.google.devtools.build.lib.packages.Type;
+import com.google.devtools.build.lib.skyframe.SkyframeActionExecutor.ConflictException;
 import com.google.devtools.build.lib.syntax.Label;
-import com.google.devtools.build.lib.view.ConfiguredTarget;
-import com.google.devtools.build.lib.view.TargetAndConfiguration;
-import com.google.devtools.build.lib.view.config.ConfigMatchingProvider;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 
 import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
 
 import javax.annotation.Nullable;
 
@@ -36,12 +46,12 @@ import javax.annotation.Nullable;
  * Build a post-processed ConfiguredTarget, vetting it for action conflict issues.
  */
 public class PostConfiguredTargetFunction implements SkyFunction {
-  private static final Function<TargetAndConfiguration, SkyKey> TO_KEYS =
-      new Function<TargetAndConfiguration, SkyKey>() {
+  private static final Function<Dependency, SkyKey> TO_KEYS =
+      new Function<Dependency, SkyKey>() {
     @Override
-    public SkyKey apply(TargetAndConfiguration input) {
+    public SkyKey apply(Dependency input) {
       return PostConfiguredTargetValue.key(
-          new LabelAndConfiguration(input.getLabel(), input.getConfiguration()));
+          new ConfiguredTargetKey(input.getLabel(), input.getConfiguration()));
     }
   };
 
@@ -55,9 +65,9 @@ public class PostConfiguredTargetFunction implements SkyFunction {
   @Nullable
   @Override
   public SkyValue compute(SkyKey skyKey, Environment env) throws SkyFunctionException {
-    ImmutableMap<Action, Exception> badActions = PrecomputedValue.BAD_ACTIONS.get(env);
+    ImmutableMap<Action, ConflictException> badActions = PrecomputedValue.BAD_ACTIONS.get(env);
     ConfiguredTargetValue ctValue = (ConfiguredTargetValue)
-        env.getValue(ConfiguredTargetValue.key((LabelAndConfiguration) skyKey.argument()));
+        env.getValue(ConfiguredTargetValue.key((ConfiguredTargetKey) skyKey.argument()));
     SkyframeDependencyResolver resolver =
         buildViewProvider.getSkyframeBuildView().createDependencyResolver(env);
     if (env.valuesMissing()) {
@@ -66,7 +76,7 @@ public class PostConfiguredTargetFunction implements SkyFunction {
 
     for (Action action : ctValue.getActions()) {
       if (badActions.containsKey(action)) {
-        throw new ActionConflictFunctionException(skyKey, badActions.get(action));
+        throw new ActionConflictFunctionException(badActions.get(action));
       }
     }
 
@@ -74,16 +84,51 @@ public class PostConfiguredTargetFunction implements SkyFunction {
     TargetAndConfiguration ctgValue =
         new TargetAndConfiguration(ct.getTarget(), ct.getConfiguration());
 
-    // TODO(bazel-team): fill in proper ConfigMatchingProvider instances.
-    // See BuildView.getDirectPrerequisites for an example.
-    Collection<TargetAndConfiguration> deps =
-        resolver.dependentNodes(ctgValue, ImmutableSet.<ConfigMatchingProvider>of());
+    Set<ConfigMatchingProvider> configConditions =
+        getConfigurableAttributeConditions(ctgValue, env);
+    if (configConditions == null) {
+      return null;
+    }
+
+    Collection<Dependency> deps = resolver.dependentNodes(ctgValue, configConditions);
     env.getValues(Iterables.transform(deps, TO_KEYS));
     if (env.valuesMissing()) {
       return null;
     }
 
     return new PostConfiguredTargetValue(ct);
+  }
+
+  /**
+   * Returns the configurable attribute conditions necessary to evaluate the given configured
+   * target, or null if not all dependencies have yet been SkyFrame-evaluated.
+   */
+  @Nullable
+  private Set<ConfigMatchingProvider> getConfigurableAttributeConditions(
+      TargetAndConfiguration ctg, Environment env) {
+    if (!(ctg.getTarget() instanceof Rule)) {
+      return ImmutableSet.of();
+    }
+    Rule rule = (Rule) ctg.getTarget();
+    RawAttributeMapper mapper = RawAttributeMapper.of(rule);
+    Set<SkyKey> depKeys = new LinkedHashSet<>();
+    for (Attribute attribute : rule.getAttributes()) {
+      for (Label label : mapper.getConfigurabilityKeys(attribute.getName(), attribute.getType())) {
+        if (!Type.Selector.isReservedLabel(label)) {
+          depKeys.add(ConfiguredTargetValue.key(label, ctg.getConfiguration()));
+        }
+      }
+    }
+    Map<SkyKey, SkyValue> cts = env.getValues(depKeys);
+    if (env.valuesMissing()) {
+      return null;
+    }
+    ImmutableSet.Builder<ConfigMatchingProvider> conditions = ImmutableSet.builder();
+    for (SkyValue ctValue : cts.values()) {
+      ConfiguredTarget ct = ((ConfiguredTargetValue) ctValue).getConfiguredTarget();
+      conditions.add(Preconditions.checkNotNull(ct.getProvider(ConfigMatchingProvider.class)));
+    }
+    return conditions.build();
   }
 
   @Nullable
@@ -93,8 +138,8 @@ public class PostConfiguredTargetFunction implements SkyFunction {
   }
 
   private static class ActionConflictFunctionException extends SkyFunctionException {
-    public ActionConflictFunctionException(SkyKey skyKey, Throwable cause) {
-      super(skyKey, cause);
+    public ActionConflictFunctionException(ConflictException e) {
+      super(e, Transience.PERSISTENT);
     }
   }
 }

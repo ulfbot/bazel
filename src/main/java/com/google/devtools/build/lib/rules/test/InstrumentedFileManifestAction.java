@@ -23,13 +23,13 @@ import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Executor;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.Util;
+import com.google.devtools.build.lib.analysis.actions.AbstractFileWriteAction;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.util.RegexFilter;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.Util;
-import com.google.devtools.build.lib.view.actions.AbstractFileWriteAction;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -59,29 +59,33 @@ class InstrumentedFileManifestAction extends AbstractFileWriteAction {
   }
 
   @Override
-  public void writeOutputFile(OutputStream out, EventHandler eventHandler,
-      Executor executor) throws IOException {
-    Writer writer = null;
-    try {
-      // Save exec paths for both instrumented source files and gcno files in the manifest
-      // in the naturally sorted order.
-      String[] fileNames = Iterables.toArray(Iterables.transform(
-          Iterables.concat(collectedSourceFiles, metadataFiles),
-          new Function<Artifact, String> () {
-            @Override
-            public String apply(Artifact artifact) { return artifact.getExecPathString(); }
-          }), String.class);
-      Arrays.sort(fileNames);
-      writer = new OutputStreamWriter(out, ISO_8859_1);
-      for (String name : fileNames) {
-        writer.write(name);
-        writer.write('\n');
+  public DeterministicWriter newDeterministicWriter(EventHandler eventHandler, Executor executor) {
+    return new DeterministicWriter() {
+      @Override
+      public void writeOutputFile(OutputStream out) throws IOException {
+        Writer writer = null;
+        try {
+          // Save exec paths for both instrumented source files and gcno files in the manifest
+          // in the naturally sorted order.
+          String[] fileNames = Iterables.toArray(Iterables.transform(
+              Iterables.concat(collectedSourceFiles, metadataFiles),
+              new Function<Artifact, String> () {
+                @Override
+                public String apply(Artifact artifact) { return artifact.getExecPathString(); }
+              }), String.class);
+          Arrays.sort(fileNames);
+          writer = new OutputStreamWriter(out, ISO_8859_1);
+          for (String name : fileNames) {
+            writer.write(name);
+            writer.write('\n');
+          }
+        } finally {
+          if (writer != null) {
+            writer.close();
+          }
+        }
       }
-    } finally {
-      if (writer != null) {
-        writer.close();
-      }
-    }
+    };
   }
 
   @Override
@@ -120,7 +124,7 @@ class InstrumentedFileManifestAction extends AbstractFileWriteAction {
         .addAll(additionalSourceFiles)
         .addAll(metadataFiles)
         .build();
-    ruleContext.getAnalysisEnvironment().registerAction(new InstrumentedFileManifestAction(
+    ruleContext.registerAction(new InstrumentedFileManifestAction(
         ruleContext.getActionOwner(), inputs, additionalSourceFiles, metadataFiles,
         instrumentedFileManifest, ruleContext.getConfiguration().getInstrumentationFilter()));
 

@@ -15,29 +15,41 @@
 package com.google.devtools.build.lib.rules.objc;
 
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.BUNDLE_IMPORT_DIR;
+import static com.google.devtools.build.lib.rules.objc.ObjcProvider.DEFINE;
+import static com.google.devtools.build.lib.rules.objc.ObjcProvider.FORCE_LOAD_FOR_XCODEGEN;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.FRAMEWORK_DIR;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.GENERAL_RESOURCE_FILE;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.IMPORTED_LIBRARY;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.INCLUDE;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.SDK_DYLIB;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.SDK_FRAMEWORK;
+import static com.google.devtools.build.lib.rules.objc.ObjcProvider.SDK_INCLUDE;
+import static com.google.devtools.build.lib.rules.objc.ObjcProvider.WEAK_SDK_FRAMEWORK;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.XCASSETS_DIR;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.XCDATAMODEL;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Function;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
+import com.google.devtools.build.lib.rules.objc.ObjcProvider.Flag;
 import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.TransitiveInfoProvider;
+import com.google.devtools.build.xcode.util.Interspersing;
 import com.google.devtools.build.xcode.xcodegen.proto.XcodeGenProtos.DependencyControl;
 import com.google.devtools.build.xcode.xcodegen.proto.XcodeGenProtos.TargetControl;
 import com.google.devtools.build.xcode.xcodegen.proto.XcodeGenProtos.XcodeprojBuildSetting;
+
+import java.util.EnumSet;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 /**
  * Provider which provides transitive dependency information that is specific to Xcodegen. In
@@ -45,7 +57,10 @@ import com.google.devtools.build.xcode.xcodegen.proto.XcodeGenProtos.XcodeprojBu
  * {@code .xcodeproj} file.
  */
 @Immutable
-final class XcodeProvider implements TransitiveInfoProvider {
+public final class XcodeProvider implements TransitiveInfoProvider {
+  /**
+   * A builder for instances of {@link XcodeProvider}.
+   */
   public static final class Builder {
     private Label label;
     private final ImmutableList.Builder<PathFragment> userHeaderSearchPaths =
@@ -59,6 +74,7 @@ final class XcodeProvider implements TransitiveInfoProvider {
     private final ImmutableList.Builder<Artifact> headers = new ImmutableList.Builder<>();
     private Optional<CompilationArtifacts> compilationArtifacts = Optional.absent();
     private ObjcProvider objcProvider;
+    private Optional<XcodeProvider> testHost = Optional.absent();
 
     /**
      * Sets the label of the build target which corresponds to this Xcode target.
@@ -147,7 +163,18 @@ final class XcodeProvider implements TransitiveInfoProvider {
       return this;
     }
 
+    /**
+     * Sets the test host. This is used for xctest targets.
+     */
+    public Builder setTestHost(XcodeProvider testHost) {
+      this.testHost = Optional.of(testHost);
+      return this;
+    }
+
     public XcodeProvider build() {
+      Preconditions.checkArgument(
+          !testHost.isPresent() || (productType == XcodeProductType.UNIT_TEST),
+          "%s product types cannot have a test host (test host: %s).", productType, testHost);
       return new XcodeProvider(this);
     }
   }
@@ -162,6 +189,7 @@ final class XcodeProvider implements TransitiveInfoProvider {
   private final ImmutableList<Artifact> headers;
   private final Optional<CompilationArtifacts> compilationArtifacts;
   private final ObjcProvider objcProvider;
+  private final Optional<XcodeProvider> testHost;
 
   private XcodeProvider(Builder builder) {
     this.label = Preconditions.checkNotNull(builder.label);
@@ -174,6 +202,40 @@ final class XcodeProvider implements TransitiveInfoProvider {
     this.headers = builder.headers.build();
     this.compilationArtifacts = builder.compilationArtifacts;
     this.objcProvider = Preconditions.checkNotNull(builder.objcProvider);
+    this.testHost = Preconditions.checkNotNull(builder.testHost);
+  }
+
+  /**
+   * Creates a builder whose values are all initialized to this provider.
+   */
+  public Builder toBuilder() {
+    Builder builder = new Builder();
+    builder.label = label;
+    builder.userHeaderSearchPaths.addAll(userHeaderSearchPaths);
+    builder.infoplistMerging = infoplistMerging;
+    builder.dependencies.addTransitive(dependencies);
+    builder.xcodeprojBuildSettings.addAll(xcodeprojBuildSettings);
+    builder.copts.addAll(copts);
+    builder.productType = productType;
+    builder.headers.addAll(headers);
+    builder.compilationArtifacts = compilationArtifacts;
+    builder.objcProvider = objcProvider;
+    builder.testHost = testHost;
+    return builder;
+  }
+
+  /**
+   * Returns a list of this provider and all its transitive dependencies.
+   */
+  private Iterable<XcodeProvider> providers() {
+    Set<XcodeProvider> providers = new LinkedHashSet<>();
+    providers.add(this);
+    Iterables.addAll(providers, dependencies);
+    for (XcodeProvider justTestHost : testHost.asSet()) {
+      providers.add(justTestHost);
+      Iterables.addAll(providers, justTestHost.dependencies);
+    }
+    return ImmutableList.copyOf(providers);
   }
 
   /**
@@ -182,28 +244,52 @@ final class XcodeProvider implements TransitiveInfoProvider {
    * whenever it is called.
    */
   ImmutableList<TargetControl> targets() {
+    return targets(ImmutableList.of(this));
+  }
+
+  /**
+   * Returns all the target controls that must be added to the xcodegen control. No other target
+   * controls are needed to generate a functional project file. This method creates a new list
+   * whenever it is called.
+   */
+  static ImmutableList<TargetControl> targets(Iterable<XcodeProvider> providers) {
+    // Collect all the dependencies of all the providers, filtering out duplicates.
+    Set<XcodeProvider> providerSet = new LinkedHashSet<>();
+    for (XcodeProvider provider : providers) {
+      Iterables.addAll(providerSet, provider.providers());
+    }
+
     ImmutableList.Builder<TargetControl> controls = new ImmutableList.Builder<>();
-    controls.add(targetControl());
-    for (XcodeProvider dependency : dependencies) {
-      controls.add(dependency.targetControl());
+    for (XcodeProvider provider : providerSet) {
+      controls.add(provider.targetControl());
     }
     return controls.build();
   }
 
+  private static final EnumSet<XcodeProductType> CAN_LINK_PRODUCT_TYPES = EnumSet.of(
+      XcodeProductType.APPLICATION, XcodeProductType.BUNDLE, XcodeProductType.UNIT_TEST);
+
   private TargetControl targetControl() {
     // TODO(bazel-team): Add provisioning profile information when Xcodegen supports it.
-    // TODO(bazel-team): Add .storyboard information when Xcodegen supports it.
     TargetControl.Builder targetControl = TargetControl.newBuilder()
         .setName(label.getName())
         .setLabel(label.toString())
         .setProductType(productType.getIdentifier())
         .addAllImportedLibrary(Artifact.toExecPaths(objcProvider.get(IMPORTED_LIBRARY)))
-        .addAllUserHeaderSearchPath(PathFragment.safePathStrings(userHeaderSearchPaths))
-        .addAllHeaderSearchPath(PathFragment.safePathStrings(objcProvider.get(INCLUDE)))
+        .addAllUserHeaderSearchPath(rootEach("$(WORKSPACE_ROOT)", userHeaderSearchPaths))
+        .addAllHeaderSearchPath(rootEach("$(WORKSPACE_ROOT)", objcProvider.get(INCLUDE)))
+        .addAllHeaderSearchPath(rootEach("$(SDKROOT)/usr/include", objcProvider.get(SDK_INCLUDE)))
         .addAllHeaderFile(Artifact.toExecPaths(headers))
-        // TODO(bazel-team): Add all build settings information once Xcodegen supports it.
+        .addAllCopt(IosSdkCommands.DEFAULT_COMPILER_FLAGS)
+        .addAllCopt(Interspersing.prependEach("-D", objcProvider.get(DEFINE)))
         .addAllCopt(copts)
+        .addAllLinkopt(
+            Interspersing.beforeEach("-force_load", objcProvider.get(FORCE_LOAD_FOR_XCODEGEN)))
+        .addAllLinkopt(IosSdkCommands.DEFAULT_LINKER_FLAGS)
+        .addAllLinkopt(Interspersing.beforeEach(
+            "-weak_framework", SdkFramework.names(objcProvider.get(WEAK_SDK_FRAMEWORK))))
         .addAllBuildSetting(xcodeprojBuildSettings)
+        .addAllBuildSetting(IosSdkCommands.defaultWarningsForXcode())
         .addAllSdkFramework(SdkFramework.names(objcProvider.get(SDK_FRAMEWORK)))
         .addAllFramework(PathFragment.safePathStrings(objcProvider.get(FRAMEWORK_DIR)))
         .addAllXcassetsDir(PathFragment.safePathStrings(objcProvider.get(XCASSETS_DIR)))
@@ -213,7 +299,7 @@ final class XcodeProvider implements TransitiveInfoProvider {
         .addAllSdkDylib(objcProvider.get(SDK_DYLIB))
         .addAllGeneralResourceFile(Artifact.toExecPaths(objcProvider.get(GENERAL_RESOURCE_FILE)));
 
-    if ((productType == XcodeProductType.APPLICATION) || (productType == XcodeProductType.BUNDLE)) {
+    if (CAN_LINK_PRODUCT_TYPES.contains(productType)) {
       for (XcodeProvider dependency : dependencies) {
         // Only add a target to a binary's dependencies if it has source files to compile. Xcode
         // cannot build targets without a source file in the PBXSourceFilesBuildPhase, so if such a
@@ -226,6 +312,12 @@ final class XcodeProvider implements TransitiveInfoProvider {
                 .build());
           }
         }
+      }
+      for (XcodeProvider justTestHost : testHost.asSet()) {
+        targetControl.addDependency(DependencyControl.newBuilder()
+            .setTargetLabel(justTestHost.label.toString())
+            .setTestHost(true)
+            .build());
       }
     }
 
@@ -245,7 +337,33 @@ final class XcodeProvider implements TransitiveInfoProvider {
             .addHeaderFile(pchFile.getExecPathString());
       }
     }
+
+    if (objcProvider.is(Flag.USES_CPP)) {
+      targetControl.addSdkDylib("libc++");
+    }
+
     return targetControl.build();
   }
-}
 
+  /**
+   * Prepends the given path to each path in {@code paths}. Empty paths are
+   * transformed to the value of {@code variable} rather than {@code variable + "/."}
+   */
+  @VisibleForTesting
+  static Iterable<String> rootEach(final String prefix, Iterable<PathFragment> paths) {
+    Preconditions.checkArgument(prefix.startsWith("$"),
+        "prefix should start with a build setting variable like '$(NAME)': %s", prefix);
+    Preconditions.checkArgument(!prefix.endsWith("/"),
+        "prefix should not end with '/': %s", prefix);
+    return Iterables.transform(paths, new Function<PathFragment, String>() {
+      @Override
+      public String apply(PathFragment input) {
+        if (input.getSafePathString().equals(".")) {
+          return prefix;
+        } else {
+          return prefix + "/" + input.getSafePathString();
+        }
+      }
+    });
+  }
+}

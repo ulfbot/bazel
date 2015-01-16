@@ -14,15 +14,15 @@
 package com.google.devtools.build.lib.bazel.rules.sh;
 
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.Runfiles;
+import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
-import com.google.devtools.build.lib.view.ConfiguredTarget;
-import com.google.devtools.build.lib.view.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.view.RuleConfiguredTargetBuilder;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.Runfiles;
-import com.google.devtools.build.lib.view.RunfilesProvider;
 
 /**
  * Implementation for the sh_library rule.
@@ -32,9 +32,9 @@ public class ShLibrary implements RuleConfiguredTargetFactory {
   @Override
   public ConfiguredTarget create(RuleContext ruleContext) {
     NestedSet<Artifact> filesToBuild = NestedSetBuilder.<Artifact>stableOrder()
-        .addAll(ruleContext.getPrerequisiteArtifacts("srcs", Mode.TARGET))
-        .addAll(ruleContext.getPrerequisiteArtifacts("deps", Mode.TARGET))
-        .addAll(ruleContext.getPrerequisiteArtifacts("data", Mode.DATA))
+        .addAll(ruleContext.getPrerequisiteArtifacts("srcs", Mode.TARGET).list())
+        .addAll(ruleContext.getPrerequisiteArtifacts("deps", Mode.TARGET).list())
+        .addAll(ruleContext.getPrerequisiteArtifacts("data", Mode.DATA).list())
         .build();
     Runfiles runfiles = new Runfiles.Builder()
         .addArtifacts(filesToBuild)

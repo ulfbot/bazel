@@ -17,6 +17,7 @@ package com.google.devtools.build.lib.skyframe;
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.HashBiMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.Constants;
 import com.google.devtools.build.lib.vfs.ModifiedFileSet;
@@ -76,7 +77,7 @@ public class LocalDiffAwareness implements DiffAwareness {
     }
   }
 
-  private boolean firstGetDiff = true;
+  private int numGetCurrentViewCalls = 0;
 
   /**
    * Bijection from WatchKey to the (absolute) Path being watched. WatchKeys don't have this
@@ -95,10 +96,30 @@ public class LocalDiffAwareness implements DiffAwareness {
     this.watchService = watchService;
   }
 
+  /**
+   * The WatchService is inherently sequential and side-effectful, so we enforce this by only
+   * supporting {@link #getDiff} calls that happen to be sequential.
+   */
+  private static class SequentialView implements DiffAwareness.View {
+    private final LocalDiffAwareness owner;
+    private final int position;
+    private final Set<Path> modifiedAbsolutePaths;
+
+    public SequentialView(LocalDiffAwareness owner, int position, Set<Path> modifiedAbsolutePaths) {
+      this.owner = owner;
+      this.position = position;
+      this.modifiedAbsolutePaths = modifiedAbsolutePaths;
+    }
+
+    public static boolean areInSequence(SequentialView oldView, SequentialView newView) {
+      return oldView.owner == newView.owner && (oldView.position + 1) == newView.position;
+    }
+  }
+
   @Override
-  public ModifiedFileSet getDiff() throws BrokenDiffAwarenessException {
-    if (firstGetDiff) {
-      firstGetDiff = false;
+  public SequentialView getCurrentView() throws BrokenDiffAwarenessException {
+    Set<Path> modifiedAbsolutePaths;
+    if (numGetCurrentViewCalls++ == 0) {
       try {
         registerSubDirectoriesAndReturnContents(watchRootPath);
       } catch (IOException e) {
@@ -106,22 +127,43 @@ public class LocalDiffAwareness implements DiffAwareness {
         throw new BrokenDiffAwarenessException(
             "Error encountered with local file system watcher " + e);
       }
+      modifiedAbsolutePaths = ImmutableSet.of();
+    } else {
+      try {
+        modifiedAbsolutePaths = collectChanges();
+      } catch (BrokenDiffAwarenessException e) {
+        close();
+        throw e;
+      } catch (IOException e) {
+        close();
+        throw new BrokenDiffAwarenessException(
+            "Error encountered with local file system watcher " + e);
+      } catch (ClosedWatchServiceException e) {
+        throw new BrokenDiffAwarenessException(
+            "Internal error with the local file system watcher " + e);
+      }
+    }
+    return new SequentialView(this, numGetCurrentViewCalls, modifiedAbsolutePaths);
+  }
+
+  @Override
+  public ModifiedFileSet getDiff(View oldView, View newView)
+      throws IncompatibleViewException, BrokenDiffAwarenessException {
+    SequentialView oldSequentialView;
+    SequentialView newSequentialView;
+    try {
+      oldSequentialView = (SequentialView) oldView;
+      newSequentialView = (SequentialView) newView;
+    } catch (ClassCastException e) {
+      throw new IncompatibleViewException("Given views are not from LocalDiffAwareness");
+    }
+    if (!SequentialView.areInSequence(oldSequentialView, newSequentialView)) {
       return ModifiedFileSet.EVERYTHING_MODIFIED;
     }
-    Set<Path> modifiedAbsolutePaths;
-    try {
-      modifiedAbsolutePaths = collectChanges();
-    } catch (IOException e) {
-      close();
-      throw new BrokenDiffAwarenessException(
-          "Error encountered with local file system watcher " + e);
-    } catch (ClosedWatchServiceException e) {
-      throw new BrokenDiffAwarenessException(
-          "Internal error with the local file system watcher " + e);
-    }
     return ModifiedFileSet.builder()
-        .modifyAll(Iterables.transform(modifiedAbsolutePaths, nioAbsolutePathToPathFragment))
-        .build();
+        .modifyAll(Iterables.transform(newSequentialView.modifiedAbsolutePaths,
+            nioAbsolutePathToPathFragment))
+            .build();
   }
 
   @Override
@@ -136,16 +178,16 @@ public class LocalDiffAwareness implements DiffAwareness {
   /** Converts java.nio.file.Path objects to vfs.PathFragment. */
   private final Function<Path, PathFragment> nioAbsolutePathToPathFragment =
       new Function<Path, PathFragment>() {
-        @Override
-        public PathFragment apply(Path input) {
-          Preconditions.checkArgument(input.startsWith(watchRootPath), "%s %s", input,
-              watchRootPath);
-          return new PathFragment(watchRootPath.relativize(input).toString());
-        }
-      };
+    @Override
+    public PathFragment apply(Path input) {
+      Preconditions.checkArgument(input.startsWith(watchRootPath), "%s %s", input,
+          watchRootPath);
+      return new PathFragment(watchRootPath.relativize(input).toString());
+    }
+  };
 
   /** Returns the changed files caught by the watch service. */
-  private Set<Path> collectChanges() throws IOException {
+  private Set<Path> collectChanges() throws BrokenDiffAwarenessException, IOException {
     Set<Path> createdFilesAndDirectories = new HashSet<Path>();
     Set<Path> deletedOrModifiedFilesAndDirectories = new HashSet<Path>();
     Set<Path> deletedTrackedDirectories = new HashSet<Path>();
@@ -158,11 +200,25 @@ public class LocalDiffAwareness implements DiffAwareness {
       // We replay all the events for this watched directory in chronological order and
       // construct the diff of this directory since the last #collectChanges call.
       for (WatchEvent<?> event : watchKey.pollEvents()) {
+        Kind<?> kind = event.kind();
+        if (kind == StandardWatchEventKinds.OVERFLOW) {
+          // TODO(bazel-team): find out when an overflow might happen, and maybe handle it more
+          // gently.
+          throw new BrokenDiffAwarenessException("Overflow when watching local filesystem for "
+              + "changes");
+        }
+        if (event.context() == null) {
+          // The WatchService documentation mentions that WatchEvent#context may return null, but
+          // doesn't explain how/why it would do so. Looking at the implementation, it only
+          // happens on an overflow event. But we make no assumptions about that implementation
+          // detail here.
+          throw new BrokenDiffAwarenessException("Insufficient information from local file system "
+              + "watcher");
+        }
         // For the events we've registered, the context given is a relative path.
         Path relativePath = (Path) event.context();
         Path path = dir.resolve(relativePath);
         Preconditions.checkState(path.isAbsolute(), path);
-        Kind<?> kind = event.kind();
         if (kind == StandardWatchEventKinds.ENTRY_CREATE) {
           createdFilesAndDirectories.add(path);
           deletedOrModifiedFilesAndDirectories.remove(path);
@@ -193,10 +249,6 @@ public class LocalDiffAwareness implements DiffAwareness {
           if (!createdFilesAndDirectories.contains(path)) {
             deletedOrModifiedFilesAndDirectories.add(path);
           }
-        } else if (kind == StandardWatchEventKinds.OVERFLOW) {
-          // TODO(bazel-team): find out when an overflow might happen, and maybe handle it more
-          // gently.
-          throw new IOException("Event overflow.");
         }
       }
 

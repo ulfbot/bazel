@@ -19,6 +19,8 @@ import com.google.common.base.Predicates;
 import com.google.common.base.Supplier;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.Constants;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.blaze.BlazeCommand;
 import com.google.devtools.build.lib.blaze.BlazeCommandDispatcher;
 import com.google.devtools.build.lib.blaze.BlazeModule;
@@ -41,8 +43,6 @@ import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.util.OsUtils;
 import com.google.devtools.build.lib.util.StringUtilities;
 import com.google.devtools.build.lib.util.io.OutErr;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
-import com.google.devtools.build.lib.view.config.InvalidConfigurationException;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParser;
@@ -207,6 +207,9 @@ public class InfoCommand implements BlazeCommand {
         } catch (InvalidConfigurationException e) {
           runtime.getReporter().handle(Event.error(e.getMessage()));
           throw new ExitCausingRuntimeException(ExitCode.COMMAND_LINE_ERROR);
+        } catch (AbruptExitException e) {
+          throw new ExitCausingRuntimeException("unknown error: " + e.getMessage(),
+              e.getExitCode());
         } catch (InterruptedException e) {
           runtime.getReporter().handle(Event.error("interrupted"));
           throw new ExitCausingRuntimeException(ExitCode.INTERRUPTED);

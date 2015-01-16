@@ -13,6 +13,8 @@
 // limitations under the License.
 package com.google.devtools.build.lib.blaze.commands;
 
+import com.google.devtools.build.lib.analysis.BuildView;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.blaze.BlazeCommand;
 import com.google.devtools.build.lib.blaze.BlazeRuntime;
 import com.google.devtools.build.lib.blaze.Command;
@@ -21,11 +23,12 @@ import com.google.devtools.build.lib.buildtool.BuildRequest.BuildRequestOptions;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
 import com.google.devtools.build.lib.pkgcache.LoadingPhaseRunner;
 import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
+import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.ExitCode;
-import com.google.devtools.build.lib.view.BuildView;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
 import com.google.devtools.common.options.OptionsParser;
 import com.google.devtools.common.options.OptionsProvider;
+
+import java.util.List;
 
 /**
  * Handles the 'build' command on the Blaze command line, including targets
@@ -47,14 +50,19 @@ import com.google.devtools.common.options.OptionsProvider;
 public final class BuildCommand implements BlazeCommand {
 
   @Override
-  public void editOptions(BlazeRuntime runtime, OptionsParser optionsParser) { }
+  public void editOptions(BlazeRuntime runtime, OptionsParser optionsParser)
+      throws AbruptExitException {
+    ProjectFileSupport.handleProjectFiles(runtime, optionsParser, "build");
+  }
 
   @Override
   public ExitCode exec(BlazeRuntime runtime, OptionsProvider options) {
+    List<String> targets = ProjectFileSupport.getTargets(runtime, options);
+
     BuildRequest request = BuildRequest.create(
         getClass().getAnnotation(Command.class).name(), options,
         runtime.getStartupOptionsProvider(),
-        options.getResidue(),
+        targets,
         runtime.getReporter().getOutErr(), runtime.getCommandId(), runtime.getCommandStartTime());
     return runtime.getBuildTool().processRequest(request, null).getExitCondition();
   }

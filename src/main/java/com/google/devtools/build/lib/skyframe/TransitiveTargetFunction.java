@@ -24,11 +24,11 @@ import com.google.devtools.build.lib.packages.NoSuchTargetException;
 import com.google.devtools.build.lib.packages.NoSuchThingException;
 import com.google.devtools.build.lib.packages.OutputFile;
 import com.google.devtools.build.lib.packages.PackageGroup;
+import com.google.devtools.build.lib.packages.PackageIdentifier;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.syntax.Label;
-import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
 import com.google.devtools.build.skyframe.SkyKey;
@@ -73,28 +73,28 @@ public class TransitiveTargetFunction implements SkyFunction {
     } catch (NoSuchTargetException e) {
       target = e.getTarget();
       if (target == null) {
-        throw new TransitiveTargetFunctionException(key, e);
+        throw new TransitiveTargetFunctionException(e);
       }
       successfulTransitiveLoading = false;
       transitiveRootCauses.add(label);
       errorLoadingTarget = e;
       packageLoadedSuccessfully = e.getPackageLoadedSuccessfully();
     } catch (NoSuchPackageException e) {
-      throw new TransitiveTargetFunctionException(key, e);
+      throw new TransitiveTargetFunctionException(e);
     } catch (NoSuchThingException e) {
       throw new IllegalStateException(e
           + " not NoSuchTargetException or NoSuchPackageException");
     }
 
-    NestedSetBuilder<PathFragment> transitiveSuccessfulPkgs = NestedSetBuilder.stableOrder();
-    NestedSetBuilder<PathFragment> transitiveUnsuccessfulPkgs = NestedSetBuilder.stableOrder();
+    NestedSetBuilder<PackageIdentifier> transitiveSuccessfulPkgs = NestedSetBuilder.stableOrder();
+    NestedSetBuilder<PackageIdentifier> transitiveUnsuccessfulPkgs = NestedSetBuilder.stableOrder();
     NestedSetBuilder<Label> transitiveTargets = NestedSetBuilder.stableOrder();
 
-    PathFragment packageName = target.getPackage().getNameFragment();
+    PackageIdentifier packageId = target.getPackage().getPackageIdentifier();
     if (packageLoadedSuccessfully) {
-      transitiveSuccessfulPkgs.add(packageName);
+      transitiveSuccessfulPkgs.add(packageId);
     } else {
-      transitiveUnsuccessfulPkgs.add(packageName);
+      transitiveUnsuccessfulPkgs.add(packageId);
     }
     transitiveTargets.add(target.getLabel());
     for (Map.Entry<SkyKey, ValueOrException<NoSuchThingException>> entry :
@@ -134,8 +134,8 @@ public class TransitiveTargetFunction implements SkyFunction {
       return null;
     }
 
-    NestedSet<PathFragment> successfullyLoadedPackages = transitiveSuccessfulPkgs.build();
-    NestedSet<PathFragment> unsuccessfullyLoadedPackages = transitiveUnsuccessfulPkgs.build();
+    NestedSet<PackageIdentifier> successfullyLoadedPackages = transitiveSuccessfulPkgs.build();
+    NestedSet<PackageIdentifier> unsuccessfullyLoadedPackages = transitiveUnsuccessfulPkgs.build();
     NestedSet<Label> loadedTargets = transitiveTargets.build();
     if (successfulTransitiveLoading) {
       return TransitiveTargetValue.successfulTransitiveLoading(successfullyLoadedPackages,
@@ -216,8 +216,8 @@ public class TransitiveTargetFunction implements SkyFunction {
      * Used to propagate an error from a direct target dependency to the
      * target that depended on it.
      */
-    public TransitiveTargetFunctionException(SkyKey key, NoSuchPackageException e) {
-      super(key, e);
+    public TransitiveTargetFunctionException(NoSuchPackageException e) {
+      super(e, Transience.PERSISTENT);
     }
 
     /**
@@ -227,8 +227,8 @@ public class TransitiveTargetFunction implements SkyFunction {
      * In keep_going mode, used the same way, but only for targets that could not be loaded at all
      * (we proceed with transitive loading on targets that contain errors).
      */
-    public TransitiveTargetFunctionException(SkyKey key, NoSuchTargetException e) {
-      super(key, e);
+    public TransitiveTargetFunctionException(NoSuchTargetException e) {
+      super(e, Transience.PERSISTENT);
     }
   }
 }

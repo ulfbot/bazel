@@ -24,14 +24,16 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Interner;
 import com.google.common.collect.Interners;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetVisitor;
 import com.google.devtools.build.lib.concurrent.AbstractQueueVisitor;
+import com.google.devtools.build.lib.concurrent.ExecutorShutdownUtil;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadCompatible;
+import com.google.devtools.build.lib.concurrent.ThrowableRecordingRunnableWrapper;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.events.StoredEventHandler;
@@ -42,6 +44,8 @@ import com.google.devtools.build.skyframe.BuildingState.DirtyState;
 import com.google.devtools.build.skyframe.EvaluationProgressReceiver.EvaluationState;
 import com.google.devtools.build.skyframe.NodeEntry.DependencyState;
 import com.google.devtools.build.skyframe.Scheduler.SchedulerException;
+import com.google.devtools.build.skyframe.SkyFunctionException.ReifiedSkyFunctionException;
+import com.google.devtools.build.skyframe.ValueOrExceptionUtils.BottomException;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -56,6 +60,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -156,6 +162,7 @@ public final class ParallelEvaluator implements Evaluator {
   class SkyFunctionEnvironment implements SkyFunction.Environment {
     private boolean building = true;
     private boolean valuesMissing = false;
+    private SkyKey depErrorKey = null;
     private final SkyKey skyKey;
     private SkyValue value = null;
     private ErrorInfo errorInfo = null;
@@ -276,18 +283,10 @@ public final class ParallelEvaluator implements Evaluator {
       this.errorInfo = Preconditions.checkNotNull(errorInfo, skyKey);
     }
 
-    /**
-     * Get a child of the node being evaluated, for use by the SkyFunction. If the child has an
-     * error and the caller requested that an exception be thrown (by passing in any exception
-     * class besides DontThrowAnyException), throws the exception associated to that error if it
-     * matches that exception class, for handling by the SkyFunction. Otherwise, just returns null
-     * for child with an error.
-     */
-    private <E extends Throwable> ValueOrException<E> getValueOrException(SkyKey depKey,
-        Class<E> exceptionClass) {
+    /** Get a child of the value being evaluated, for use by the value builder. */
+    private ValueOrUntypedException getValueOrUntypedException(SkyKey depKey) {
       checkActive();
       depKey = KEY_CANONICALIZER.intern(depKey);  // Canonicalize SkyKeys to save memory.
-      boolean throwException = exceptionClass != DontThrowAnyException.class;
       ValueWithMetadata value = getValueMaybeFromError(depKey, bubbleErrorInfo);
       if (value == null) {
         // If this entry is not yet done then (optionally) record the missing dependency and return
@@ -295,12 +294,12 @@ public final class ParallelEvaluator implements Evaluator {
         valuesMissing = true;
         if (bubbleErrorInfo != null) {
           // Values being built just for their errors don't get to request new children.
-          return ValueOrException.ofNull();
+          return ValueOrExceptionUtils.ofNull();
         }
         Preconditions.checkState(!directDeps.contains(depKey), "%s %s %s", skyKey, depKey, value);
         addDep(depKey);
         valuesMissing = true;
-        return ValueOrException.ofNull();
+        return ValueOrExceptionUtils.ofNull();
       }
 
       if (!directDeps.contains(depKey)) {
@@ -320,65 +319,181 @@ public final class ParallelEvaluator implements Evaluator {
         // The caller is given the value of the value if there was no error computing the value, or
         // if this is a keepGoing build (in which case each value should get child values even if
         // there are also errors).
-        return ValueOrException.ofValue(value.getValue());
+        return ValueOrExceptionUtils.ofValueUntyped(value.getValue());
       }
 
       // There was an error building the value, which we will either report by throwing an exception
       // or insulate the caller from by returning null.
       Preconditions.checkNotNull(errorInfo, "%s %s %s", skyKey, depKey, value);
-      if (throwException) {
-        if (bubbleErrorInfo != null) {
-          // Set interrupted status, so that builder doesn't try anything fancy after this.
-          Thread.currentThread().interrupt();
+
+      if (!keepGoing && errorInfo.getException() != null && bubbleErrorInfo == null) {
+        // Child errors should not be propagated in noKeepGoing mode (except during error bubbling).
+        // Instead we should fail fast.
+
+        // We arbitrarily record the first child error.
+        if (depErrorKey == null) {
+          depErrorKey = depKey;
         }
-        if (errorInfo.getException() != null) {
-          // Give builder a chance to handle this exception but only if we are in keep going mode
-          // or in error bubbling. Otherwise, we want to fail fast.
-          Throwable e = errorInfo.getException();
-          if (exceptionClass.isInstance(e) && (keepGoing || bubbleErrorInfo != null)) {
-            return ValueOrException.ofException(exceptionClass.cast(e));
-          }
-          valuesMissing = true;
-          return ValueOrException.ofNull();
+        valuesMissing = true;
+        return ValueOrExceptionUtils.ofNull();
+      }
+
+      if (bubbleErrorInfo != null) {
+        // Set interrupted status, so that builder doesn't try anything fancy after this.
+        Thread.currentThread().interrupt();
+      }
+      if (errorInfo.getException() != null) {
+        // Give builder a chance to handle this exception.
+        Exception e = errorInfo.getException();
+        return ValueOrExceptionUtils.ofExn(e);
+      }
+      // In a cycle.
+      Preconditions.checkState(!Iterables.isEmpty(errorInfo.getCycleInfo()), "%s %s %s %s", skyKey,
+          depKey, errorInfo, value);
+      valuesMissing = true;
+      return ValueOrExceptionUtils.ofNull();
+    }
+
+    private <E extends Exception> ValueOrException<E> getValueOrException(SkyKey depKey,
+        Class<E> exceptionClass) {
+      return ValueOrExceptionUtils.downcovert(getValueOrException(depKey, exceptionClass,
+          BottomException.class), exceptionClass);
+    }
+
+    private <E1 extends Exception, E2 extends Exception> ValueOrException2<E1, E2>
+        getValueOrException(SkyKey depKey, Class<E1> exceptionClass1, Class<E2> exceptionClass2) {
+      return ValueOrExceptionUtils.downconvert(getValueOrException(depKey, exceptionClass1,
+          exceptionClass2, BottomException.class), exceptionClass1, exceptionClass2);
+    }
+
+    private <E1 extends Exception, E2 extends Exception, E3 extends Exception>
+    ValueOrException3<E1, E2, E3> getValueOrException(SkyKey depKey, Class<E1> exceptionClass1,
+            Class<E2> exceptionClass2, Class<E3> exceptionClass3) {
+      return ValueOrExceptionUtils.downconvert(getValueOrException(depKey, exceptionClass1,
+          exceptionClass2, exceptionClass3, BottomException.class), exceptionClass1,
+          exceptionClass2, exceptionClass3);
+    }
+
+    private <E1 extends Exception, E2 extends Exception, E3 extends Exception,
+        E4 extends Exception> ValueOrException4<E1, E2, E3, E4> getValueOrException(SkyKey depKey,
+        Class<E1> exceptionClass1, Class<E2> exceptionClass2, Class<E3> exceptionClass3,
+        Class<E4> exceptionClass4) {
+      SkyFunctionException.validateExceptionType(exceptionClass1);
+      SkyFunctionException.validateExceptionType(exceptionClass2);
+      SkyFunctionException.validateExceptionType(exceptionClass3);
+      SkyFunctionException.validateExceptionType(exceptionClass4);
+      ValueOrUntypedException voe = getValueOrUntypedException(depKey);
+      SkyValue value = voe.getValue();
+      if (value != null) {
+        return ValueOrExceptionUtils.ofValue(value);
+      }
+      Exception e = voe.getException();
+      if (e != null) {
+        if (exceptionClass1.isInstance(e)) {
+          return ValueOrExceptionUtils.ofExn1(exceptionClass1.cast(e));
         }
-        // In a cycle.
-        Preconditions.checkState(!Iterables.isEmpty(errorInfo.getCycleInfo()), "%s %s %s %s %s",
-            skyKey, depKey, errorInfo, exceptionClass, value);
+        if (exceptionClass2.isInstance(e)) {
+          return ValueOrExceptionUtils.ofExn2(exceptionClass2.cast(e));
+        }
+        if (exceptionClass3.isInstance(e)) {
+          return ValueOrExceptionUtils.ofExn3(exceptionClass3.cast(e));
+        }
+        if (exceptionClass4.isInstance(e)) {
+          return ValueOrExceptionUtils.ofExn4(exceptionClass4.cast(e));
+        }
       }
       valuesMissing = true;
-      return ValueOrException.ofNull();
+      return ValueOrExceptionUtils.ofNullValue();
     }
 
     @Override
-    public <E extends Throwable> SkyValue getValueOrThrow(SkyKey depKey, Class<E> exceptionClass)
+    @Nullable
+    public SkyValue getValue(SkyKey depKey) {
+      try {
+        return getValueOrThrow(depKey, BottomException.class);
+      } catch (BottomException e) {
+        throw new IllegalStateException("shouldn't reach here");
+      }
+    }
+
+    @Override
+    @Nullable
+    public <E extends Exception> SkyValue getValueOrThrow(SkyKey depKey, Class<E> exceptionClass)
         throws E {
       return getValueOrException(depKey, exceptionClass).get();
     }
 
     @Override
-    public SkyValue getValue(SkyKey depKey) {
-      return getValueFromVOE(getValueOrException(depKey, DontThrowAnyException.class));
+    @Nullable
+    public <E1 extends Exception, E2 extends Exception> SkyValue getValueOrThrow(SkyKey depKey,
+        Class<E1> exceptionClass1, Class<E2> exceptionClass2) throws E1, E2 {
+      return getValueOrException(depKey, exceptionClass1, exceptionClass2).get();
     }
 
     @Override
-    public <E extends Throwable> Map<SkyKey, ValueOrException<E>> getValuesOrThrow(
-        Iterable<SkyKey> depKeys, Class<E> exceptionClass) {
-      Map<SkyKey, ValueOrException<E>> result = new HashMap<>(128);
-      newlyRequestedDeps.startGroup();
-      for (SkyKey key : depKeys) {
-        if (result.containsKey(key)) {
-          continue;
-        }
-        result.put(key, getValueOrException(key, exceptionClass));
-      }
-      newlyRequestedDeps.endGroup();
-      return Collections.unmodifiableMap(result);
+    @Nullable
+    public <E1 extends Exception, E2 extends Exception,
+        E3 extends Exception> SkyValue getValueOrThrow(SkyKey depKey, Class<E1> exceptionClass1,
+        Class<E2> exceptionClass2, Class<E3> exceptionClass3) throws E1, E2, E3 {
+      return getValueOrException(depKey, exceptionClass1, exceptionClass2, exceptionClass3).get();
+    }
+
+    @Override
+    public <E1 extends Exception, E2 extends Exception, E3 extends Exception,
+        E4 extends Exception> SkyValue getValueOrThrow(SkyKey depKey, Class<E1> exceptionClass1,
+        Class<E2> exceptionClass2, Class<E3> exceptionClass3, Class<E4> exceptionClass4) throws E1,
+        E2, E3, E4 {
+      return getValueOrException(depKey, exceptionClass1, exceptionClass2, exceptionClass3,
+          exceptionClass4).get();
     }
 
     @Override
     public Map<SkyKey, SkyValue> getValues(Iterable<SkyKey> depKeys) {
-      return Maps.transformValues(getValuesOrThrow(depKeys, DontThrowAnyException.class),
-          GET_VALUE_FROM_NOE);
+      return Maps.transformValues(getValuesOrThrow(depKeys, BottomException.class),
+          GET_VALUE_FROM_VOE);
+    }
+
+    @Override
+    public <E extends Exception> Map<SkyKey, ValueOrException<E>> getValuesOrThrow(
+        Iterable<SkyKey> depKeys, Class<E> exceptionClass) {
+      return Maps.transformValues(getValuesOrThrow(depKeys, exceptionClass, BottomException.class),
+          makeSafeDowncastToVOEFunction(exceptionClass));
+    }
+
+    @Override
+    public <E1 extends Exception,
+        E2 extends Exception> Map<SkyKey, ValueOrException2<E1, E2>> getValuesOrThrow(
+        Iterable<SkyKey> depKeys, Class<E1> exceptionClass1, Class<E2> exceptionClass2) {
+      return Maps.transformValues(getValuesOrThrow(depKeys, exceptionClass1, exceptionClass2,
+          BottomException.class), makeSafeDowncastToVOE2Function(exceptionClass1,
+              exceptionClass2));
+    }
+
+    @Override
+    public <E1 extends Exception, E2 extends Exception, E3 extends Exception> Map<SkyKey,
+        ValueOrException3<E1, E2, E3>> getValuesOrThrow(Iterable<SkyKey> depKeys,
+        Class<E1> exceptionClass1, Class<E2> exceptionClass2, Class<E3> exceptionClass3) {
+      return Maps.transformValues(getValuesOrThrow(depKeys, exceptionClass1, exceptionClass2,
+          exceptionClass3, BottomException.class), makeSafeDowncastToVOE3Function(exceptionClass1,
+              exceptionClass2, exceptionClass3));
+    }
+
+    @Override
+    public <E1 extends Exception, E2 extends Exception, E3 extends Exception,
+        E4 extends Exception> Map<SkyKey, ValueOrException4<E1, E2, E3, E4>> getValuesOrThrow(
+        Iterable<SkyKey> depKeys, Class<E1> exceptionClass1, Class<E2> exceptionClass2,
+        Class<E3> exceptionClass3, Class<E4> exceptionClass4) {
+      Map<SkyKey, ValueOrException4<E1, E2, E3, E4>> result = new HashMap<>();
+      newlyRequestedDeps.startGroup();
+      for (SkyKey depKey : depKeys) {
+        if (result.containsKey(depKey)) {
+          continue;
+        }
+        result.put(depKey, getValueOrException(depKey, exceptionClass1, exceptionClass2,
+            exceptionClass3, exceptionClass4));
+      }
+      newlyRequestedDeps.endGroup();
+      return Collections.unmodifiableMap(result);
     }
 
     private void addDep(SkyKey key) {
@@ -391,6 +506,15 @@ public final class ParallelEvaluator implements Evaluator {
     @Override
     public boolean valuesMissing() {
       return valuesMissing;
+    }
+
+    /**
+     * If {@code !keepGoing} and there is at least one dep in error, returns a dep in error.
+     * Otherwise returns {@code null}.
+     */
+    @Nullable
+    private SkyKey getDepErrorKey() {
+      return depErrorKey;
     }
 
     @Override
@@ -486,29 +610,59 @@ public final class ParallelEvaluator implements Evaluator {
     CountDownLatch getExceptionLatchForTesting() {
       return visitor.getExceptionLatchForTestingOnly();
     }
-  }
 
-  /** Class to signal that no exception should be thrown when retrieving a value. */
-  private class DontThrowAnyException extends RuntimeException {}
-
-
-  @Nullable
-  private static SkyValue getValueFromVOE(ValueOrException<DontThrowAnyException> vOE) {
-    try {
-      return vOE.get();
-    } catch (Throwable e) {
-      // Should never get here -- this particular ValueOrException.get() should never throw.
-      throw new IllegalStateException(e);
+    @Override
+    public boolean inErrorBubblingForTesting() {
+      return bubbleErrorInfo != null;
     }
   }
 
-  private static final Function<ValueOrException<DontThrowAnyException>, SkyValue>
-      GET_VALUE_FROM_NOE = new Function<ValueOrException<DontThrowAnyException>, SkyValue>() {
+  private static final Function<ValueOrException<BottomException>, SkyValue> GET_VALUE_FROM_VOE =
+      new Function<ValueOrException<BottomException>, SkyValue>() {
     @Override
-    public SkyValue apply(ValueOrException<DontThrowAnyException> nOE) {
-      return getValueFromVOE(nOE);
+    public SkyValue apply(ValueOrException<BottomException> voe) {
+      return ValueOrExceptionUtils.downcovert(voe);
     }
   };
+
+  private static <E extends Exception>
+      Function<ValueOrException2<E, BottomException>, ValueOrException<E>>
+      makeSafeDowncastToVOEFunction(final Class<E> exceptionClass) {
+    return new Function<ValueOrException2<E, BottomException>, ValueOrException<E>>() {
+      @Override
+      public ValueOrException<E> apply(ValueOrException2<E, BottomException> voe) {
+        return ValueOrExceptionUtils.downcovert(voe, exceptionClass);
+      }
+    };
+  }
+
+  private static <E1 extends Exception, E2 extends Exception>
+      Function<ValueOrException3<E1, E2, BottomException>, ValueOrException2<E1, E2>>
+      makeSafeDowncastToVOE2Function(final Class<E1> exceptionClass1,
+      final Class<E2> exceptionClass2) {
+    return new Function<ValueOrException3<E1, E2, BottomException>,
+        ValueOrException2<E1, E2>>() {
+      @Override
+      public ValueOrException2<E1, E2> apply(ValueOrException3<E1, E2, BottomException> voe) {
+        return ValueOrExceptionUtils.downconvert(voe, exceptionClass1, exceptionClass2);
+      }
+    };
+  }
+
+  private static <E1 extends Exception, E2 extends Exception, E3 extends Exception>
+      Function<ValueOrException4<E1, E2, E3, BottomException>, ValueOrException3<E1, E2, E3>>
+      makeSafeDowncastToVOE3Function(final Class<E1> exceptionClass1,
+          final Class<E2> exceptionClass2, final Class<E3> exceptionClass3) {
+    return new Function<ValueOrException4<E1, E2, E3, BottomException>,
+        ValueOrException3<E1, E2, E3>>() {
+      @Override
+      public ValueOrException3<E1, E2, E3> apply(ValueOrException4<E1, E2, E3,
+          BottomException> voe) {
+        return ValueOrExceptionUtils.downconvert(voe, exceptionClass1, exceptionClass2,
+            exceptionClass3);
+      }
+    };
+  }
 
   private class ValueVisitor extends AbstractQueueVisitor {
     private AtomicBoolean preventNewEvaluations = new AtomicBoolean(false);
@@ -554,30 +708,6 @@ public final class ParallelEvaluator implements Evaluator {
 
     private boolean isInflight(SkyKey key) {
       return inflightNodes.contains(key);
-    }
-
-    private void clean() {
-      // TODO(bazel-team): In nokeep_going mode or in case of an interrupt, we need to remove
-      // partial values from the graph. Find a better way to handle those cases.
-      for (SkyKey key : inflightNodes) {
-        NodeEntry entry = graph.get(key);
-        if (entry.isDone()) {
-          // Entry may be done in case of a RuntimeException or other programming bug. Do nothing,
-          // since (a) we're about to crash anyway, and (b) getTemporaryDirectDeps cannot be called
-          // on a done node, so the call below would crash, which would mask the actual exception
-          // that caused this state.
-          continue;
-        }
-        Set<SkyKey> temporaryDeps = entry.getTemporaryDirectDeps();
-        graph.remove(key);
-        for (SkyKey dep : temporaryDeps) {
-          NodeEntry nodeEntry = graph.get(dep);
-          if (nodeEntry != null) {  // TODO(bazel-team): Is this right?
-            // Don't crash here if we are about to crash anyway. This crash would mask the other.
-            nodeEntry.removeReverseDep(key);
-          }
-        }
-      }
     }
   }
 
@@ -692,41 +822,46 @@ public final class ParallelEvaluator implements Evaluator {
       Set<SkyKey> directDeps = state.getTemporaryDirectDeps();
       Preconditions.checkState(!directDeps.contains(ErrorTransienceValue.key()),
           "%s cannot have a dep on ErrorTransienceValue during building: %s", skyKey, state);
-      // Get the corresponding node builder and call it on this value.
-      SkyFunctionEnvironment env = new SkyFunctionEnvironment(skyKey, directDeps, visitor); 
+      // Get the corresponding SkyFunction and call it on this value.
+      SkyFunctionEnvironment env = new SkyFunctionEnvironment(skyKey, directDeps, visitor);
       SkyFunctionName functionName = skyKey.functionName();
       SkyFunction factory = skyFunctions.get(functionName);
       Preconditions.checkState(factory != null, "%s %s", functionName, state);
 
-      SkyValue value;
+      SkyValue value = null;
       Profiler.instance().startTask(ProfilerTask.SKYFUNCTION, skyKey);
       try {
         // TODO(bazel-team): count how many of these calls returns null vs. non-null
         value = factory.compute(skyKey, env);
       } catch (final SkyFunctionException builderException) {
-        boolean shouldFailFast = !keepGoing || builderException.isCatastrophic();
-        if (shouldFailFast) {
-          // After we commit this error to the graph but before the eval call completes with the
-          // error there is a race-like opportunity for the error to be used, either by an inflight
-          // computation or by a future computation.
-          if (errorEncountered.compareAndSet(false, true)) {
-            // This is the first error encountered.
-            visitor.preventNewEvaluations();
-          } else {
-            // This is not the first error encountered, so we ignore it so that we can terminate
-            // with the first error.
+        ReifiedSkyFunctionException reifiedBuilderException =
+            new ReifiedSkyFunctionException(builderException, skyKey);
+        // Propagated transitive errors are treated the same as missing deps.
+        if (reifiedBuilderException.getRootCauseSkyKey().equals(skyKey)) {
+          boolean shouldFailFast = !keepGoing || builderException.isCatastrophic();
+          if (shouldFailFast) {
+            // After we commit this error to the graph but before the eval call completes with the
+            // error there is a race-like opportunity for the error to be used, either by an
+            // inflight computation or by a future computation.
+            if (errorEncountered.compareAndSet(false, true)) {
+              // This is the first error encountered.
+              visitor.preventNewEvaluations();
+            } else {
+              // This is not the first error encountered, so we ignore it so that we can terminate
+              // with the first error.
+              return;
+            }
+          }
+
+          registerNewlyDiscoveredDepsForDoneEntry(skyKey, state, env);
+          ErrorInfo errorInfo = new ErrorInfo(reifiedBuilderException);
+          env.setError(errorInfo);
+          env.commit(/*enqueueParents=*/keepGoing);
+          if (!shouldFailFast) {
             return;
           }
+          throw SchedulerException.ofError(errorInfo, skyKey);
         }
-
-        registerNewlyDiscoveredDepsForDoneEntry(skyKey, state, env);
-        ErrorInfo errorInfo = new ErrorInfo(builderException, skyKey);
-        env.setError(errorInfo);
-        env.commit(/*enqueueParents=*/keepGoing);
-        if (!shouldFailFast) {
-          return;
-        }
-        throw SchedulerException.ofError(errorInfo, skyKey);
       } catch (InterruptedException ie) {
         // InterruptedException cannot be thrown by Runnable.run, so we must wrap it.
         // Interrupts can be caught by both the Evaluator and the AbstractQueueVisitor.
@@ -753,6 +888,40 @@ public final class ParallelEvaluator implements Evaluator {
         return;
       }
 
+      if (!newDirectDeps.isEmpty() && env.getDepErrorKey() != null) {
+        Preconditions.checkState(!keepGoing);
+        // We encountered a child error in noKeepGoing mode, so we want to fail fast. But we first
+        // need to add the edge between the current node and the child error it requested so that
+        // error bubbling can occur. Note that this edge will subsequently be removed during graph
+        // cleaning (since the current node will never be committed to the graph).
+        SkyKey childErrorKey = env.getDepErrorKey();
+        NodeEntry childErrorEntry = Preconditions.checkNotNull(graph.get(childErrorKey),
+            "skyKey: %s, state: %s childErrorKey: %s", skyKey, state, childErrorKey);
+        if (!state.getTemporaryDirectDeps().contains(childErrorKey)) {
+          // This means the cached error was freshly requested (e.g. the parent has never been
+          // built before).
+          Preconditions.checkState(newDirectDeps.contains(childErrorKey), "%s %s %s", state,
+              childErrorKey, newDirectDeps);
+          state.addTemporaryDirectDeps(GroupedListHelper.create(ImmutableList.of(childErrorKey)));
+          DependencyState childErrorState = childErrorEntry.addReverseDepAndCheckIfDone(skyKey);
+          Preconditions.checkState(childErrorState == DependencyState.DONE,
+              "skyKey: %s, state: %s childErrorKey: %s", skyKey, state, childErrorKey,
+              childErrorEntry);
+        } else {
+          // This means the cached error was previously requested, and was then subsequently (after
+          // a restart) requested along with another sibling dep. This can happen on an incremental
+          // eval call when the parent is dirty and the child error is in a separate dependency
+          // group from the sibling dep.
+          Preconditions.checkState(!newDirectDeps.contains(childErrorKey), "%s %s %s", state,
+              childErrorKey, newDirectDeps);
+          Preconditions.checkState(childErrorEntry.isDone(),
+              "skyKey: %s, state: %s childErrorKey: %s", skyKey, state, childErrorKey,
+              childErrorEntry);
+        }
+        ErrorInfo childErrorInfo = Preconditions.checkNotNull(childErrorEntry.getErrorInfo());
+        throw SchedulerException.ofError(childErrorInfo, childErrorKey);
+      }
+
       // TODO(bazel-team): This code is not safe to interrupt, because we would lose the state in
       // newDirectDeps.
 
@@ -774,49 +943,11 @@ public final class ParallelEvaluator implements Evaluator {
         }
         return;
       }
-      ErrorInfo errorInfo = null;
-      SkyKey childErrorKey = null;
-      List<SkyKey> childrenToEnqueue = Lists.newArrayList();
+
       for (SkyKey newDirectDep : newDirectDeps) {
-        NodeEntry childEntry = graph.createIfAbsent(newDirectDep);
-        switch (childEntry.addReverseDepAndCheckIfDone(skyKey)) {
-          case DONE:
-            boolean parentDone = state.signalDep(childEntry.getVersion());
-            // If we are not in keep going mode and we just declared a dep on a node in error then
-            // we want to halt eagerly, after adding all the reverse deps. The same is true for a
-            // catastrophic error, even in keep going mode.
-            boolean shouldFailFastOnChildError = childEntry.getErrorInfo() != null && (!keepGoing
-                || childEntry.getErrorInfo().isCatastrophic());
-            if (shouldFailFastOnChildError && errorInfo == null) {
-              // Arbitrarily pick the first error.
-              errorInfo = childEntry.getErrorInfo();
-              childErrorKey = newDirectDep;
-            }
-            if (parentDone && errorInfo == null) {
-              // This can only happen if there are no more children to be added and there is no
-              // child with an error that should cause us to fail fast. In this case, we want to
-              // proceed with re-evaluation of the current node.
-              visitor.enqueueEvaluation(skyKey);
-            }
-            break;
-          case ADDED_DEP:
-            break;
-          case NEEDS_SCHEDULING:
-            childrenToEnqueue.add(newDirectDep);
-            break;
-        }
+        enqueueChild(skyKey, state, newDirectDep);
       }
-      if (errorInfo != null) {
-        // We encountered a child error in no keep going mode, so we fail fast.
-        throw SchedulerException.ofError(errorInfo, childErrorKey);
-      }
-      for (SkyKey childToEnqueue : childrenToEnqueue) {
-        visitor.enqueueEvaluation(childToEnqueue);
-      }
-      // At this point we have enqueued evaluations of child nodes. When all of those children are
-      // done, the current node will be scheduled for re-evaluation. So it's important that there
-      // be no code below this point; otherwise there could be two threads doing things with the
-      // current node.
+      // It is critical that there is no code below this point.
     }
 
     private String prepareCrashMessage(SkyKey skyKey, Iterable<SkyKey> reverseDeps) {
@@ -966,6 +1097,13 @@ public final class ParallelEvaluator implements Evaluator {
       }
     }
 
+    // We delay this check until we know that some kind of evaluation is necessary, since !keepGoing
+    // and !keepsEdges are incompatible only in the case of a failed evaluation -- there is no
+    // need to be overly harsh to callers who are just trying to retrieve a cached result.
+    Preconditions.checkState(keepGoing || !(graph instanceof InMemoryGraph)
+        || ((InMemoryGraph) graph).keepsEdges(),
+        "nokeep_going evaluations are not allowed if graph edges are not kept: %s", skyKeys);
+
     Profiler.instance().startTask(ProfilerTask.SKYFRAME_EVAL, skyKeySet);
     try {
       return eval(skyKeySet, new ValueVisitor(threadCount));
@@ -1009,7 +1147,61 @@ public final class ParallelEvaluator implements Evaluator {
     try {
       return waitForCompletionAndConstructResult(visitor, skyKeys);
     } finally {
-      visitor.clean();
+      // TODO(bazel-team): In nokeep_going mode or in case of an interrupt, we need to remove
+      // partial values from the graph. Find a better way to handle those cases.
+      clean(visitor.inflightNodes);
+    }
+  }
+
+  private void clean(Set<SkyKey> inflightNodes) throws InterruptedException {
+    boolean alreadyInterrupted = Thread.interrupted();
+    // This parallel computation is fully cpu-bound, so we use a thread for each processor.
+    ExecutorService executor = Executors.newFixedThreadPool(
+        Runtime.getRuntime().availableProcessors(),
+        new ThreadFactoryBuilder().setNameFormat("ParallelEvaluator#clean %d").build());
+    ThrowableRecordingRunnableWrapper wrapper =
+        new ThrowableRecordingRunnableWrapper("ParallelEvaluator#clean");
+    for (final SkyKey key : inflightNodes) {
+      final NodeEntry entry = graph.get(key);
+      if (entry.isDone()) {
+        // Entry may be done in case of a RuntimeException or other programming bug. Do nothing,
+        // since (a) we're about to crash anyway, and (b) getTemporaryDirectDeps cannot be called
+        // on a done node, so the call below would crash, which would mask the actual exception
+        // that caused this state.
+        continue;
+      }
+      executor.execute(wrapper.wrap(new Runnable() {
+        @Override
+        public void run() {
+          cleanInflightNode(key, entry);
+        }
+      }));
+    }
+    // We uninterruptibly wait for all nodes to be cleaned because we want to make sure the graph
+    // is left in a good state.
+    //
+    // TODO(bazel-team): Come up with a better design for graph cleaning such that we can respond
+    // to interrupts in constant time.
+    boolean newlyInterrupted = ExecutorShutdownUtil.uninterruptibleShutdown(executor);
+    Throwables.propagateIfPossible(wrapper.getFirstThrownError());
+    if (newlyInterrupted || alreadyInterrupted) {
+      throw new InterruptedException();
+    }
+  }
+
+  private void cleanInflightNode(SkyKey key, NodeEntry entry) {
+    Set<SkyKey> temporaryDeps = entry.getTemporaryDirectDeps();
+    graph.remove(key);
+    for (SkyKey dep : temporaryDeps) {
+      NodeEntry nodeEntry = graph.get(dep);
+      // The direct dep might have already been cleaned from the graph.
+      if (nodeEntry != null) {
+        // Only bother removing the reverse dep on done nodes since other inflight nodes will be
+        // cleaned too.
+        if (nodeEntry.isDone()) {
+          nodeEntry.removeReverseDep(key);
+        }
+      }
     }
   }
 
@@ -1110,11 +1302,23 @@ public final class ParallelEvaluator implements Evaluator {
         if (bubbleParentEntry.isDone()) {
           // This parent is cached from a previous evaluate call. We shouldn't bubble up to it
           // since any error message produced won't be meaningful to this evaluate call.
+          // The child error must also be cached from a previous build.
+          Preconditions.checkState(errorEntry.isDone(), "%s %s", errorEntry, bubbleParentEntry);
           Version parentVersion = bubbleParentEntry.getVersion();
+          Version childVersion = errorEntry.getVersion();
+          Preconditions.checkState(childVersion.atMost(graphVersion)
+              && !childVersion.equals(graphVersion),
+              "child entry is not older than the current graph version, but had a done parent. "
+              + "child: %s childEntry: %s, childVersion: %s"
+              + "bubbleParent: %s bubbleParentEntry: %s, parentVersion: %s, graphVersion: %s",
+              errorKey, errorEntry, childVersion,
+              bubbleParent, bubbleParentEntry, parentVersion, graphVersion);
           Preconditions.checkState(parentVersion.atMost(graphVersion)
               && !parentVersion.equals(graphVersion),
-              "parent entry is not older than the current graph version. bubbleParent: %s "
-              + " bubbleParentEntry: %s, parentVersion: %s, graphVersion: %s",
+              "parent entry is not older than the current graph version. "
+              + "child: %s childEntry: %s, childVersion: %s"
+              + "bubbleParent: %s bubbleParentEntry: %s, parentVersion: %s, graphVersion: %s",
+              errorKey, errorEntry, childVersion,
               bubbleParent, bubbleParentEntry, parentVersion, graphVersion);
           continue;
         }
@@ -1152,11 +1356,15 @@ public final class ParallelEvaluator implements Evaluator {
         // care about a return value.
         factory.compute(parent, env);
       } catch (SkyFunctionException builderException) {
-        error = new ErrorInfo(builderException, parent);
-        bubbleErrorInfo.put(errorKey,
-            ValueWithMetadata.error(new ErrorInfo(errorKey, ImmutableSet.of(error)),
-                env.buildEvents(/*missingChildren=*/true)));
-        continue;
+        ReifiedSkyFunctionException reifiedBuilderException =
+            new ReifiedSkyFunctionException(builderException, parent);
+        if (reifiedBuilderException.getRootCauseSkyKey().equals(parent)) {
+          error = new ErrorInfo(reifiedBuilderException);
+          bubbleErrorInfo.put(errorKey,
+              ValueWithMetadata.error(new ErrorInfo(errorKey, ImmutableSet.of(error)),
+                  env.buildEvents(/*missingChildren=*/true)));
+          continue;
+        }
       } catch (InterruptedException interruptedException) {
         // Do nothing.
         // This throw happens if the builder requested the failed node, and then checked the

@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.rules.cpp;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Functions;
+import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
@@ -24,6 +25,10 @@ import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Root;
+import com.google.devtools.build.lib.analysis.AnalysisEnvironment;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.rules.cpp.CppCompileAction.DotdFile;
@@ -32,10 +37,6 @@ import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.util.FileType;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.AnalysisEnvironment;
-import com.google.devtools.build.lib.view.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -55,7 +56,7 @@ public class CppCompileActionBuilder {
   private final Label sourceLabel;
   private final NestedSetBuilder<Artifact> mandatoryInputsBuilder;
   private NestedSetBuilder<Artifact> pluginInputsBuilder;
-  private final NestedSetBuilder<Artifact> optionalInputsBuilder;
+  private Artifact optionalSourceFile;
   private Artifact outputFile;
   private PathFragment tempOutputFile;
   private DotdFile dotdFile;
@@ -67,13 +68,14 @@ public class CppCompileActionBuilder {
   private final List<Pattern> nocopts = new ArrayList<>();
   private AnalysisEnvironment analysisEnvironment;
   private ImmutableList<PathFragment> extraSystemIncludePrefixes = ImmutableList.of();
-  private boolean enableModules;
+  private boolean enableLayeringCheck;
+  private boolean compileHeaderModules;
   private String fdoBuildStamp;
   private IncludeResolver includeResolver = CppCompileAction.VOID_INCLUDE_RESOLVER;
   private UUID actionClassId = GUID;
   private Class<? extends CppCompileActionContext> actionContext;
   private CppConfiguration cppConfiguration;
-  private ImmutableMap<PathFragment, IncludeScannable> lipoScannableMap;
+  private ImmutableMap<Artifact, IncludeScannable> lipoScannableMap;
 
   /**
    * Creates a builder from a rule. This also uses the configuration and
@@ -89,13 +91,12 @@ public class CppCompileActionBuilder {
     this.configuration = ruleContext.getConfiguration();
     this.mandatoryInputsBuilder = NestedSetBuilder.stableOrder();
     this.pluginInputsBuilder = NestedSetBuilder.stableOrder();
-    this.optionalInputsBuilder = NestedSetBuilder.stableOrder();
     this.lipoScannableMap = getLipoScannableMap(ruleContext);
 
     features.addAll(ruleContext.getFeatures());
   }
 
-  private static ImmutableMap<PathFragment, IncludeScannable> getLipoScannableMap(
+  private static ImmutableMap<Artifact, IncludeScannable> getLipoScannableMap(
       RuleContext ruleContext) {
     if (!ruleContext.getFragment(CppConfiguration.class).isLipoOptimization()) {
       return null;
@@ -121,7 +122,6 @@ public class CppCompileActionBuilder {
     this.configuration = configuration;
     this.mandatoryInputsBuilder = NestedSetBuilder.stableOrder();
     this.pluginInputsBuilder = NestedSetBuilder.stableOrder();
-    this.optionalInputsBuilder = NestedSetBuilder.stableOrder();
     this.lipoScannableMap = ImmutableMap.of();
   }
 
@@ -137,8 +137,7 @@ public class CppCompileActionBuilder {
         .addTransitive(other.mandatoryInputsBuilder.build());
     this.pluginInputsBuilder = NestedSetBuilder.<Artifact>stableOrder()
         .addTransitive(other.pluginInputsBuilder.build());
-    this.optionalInputsBuilder = NestedSetBuilder.<Artifact>stableOrder()
-        .addTransitive(other.optionalInputsBuilder.build());
+    this.optionalSourceFile = other.optionalSourceFile;
     this.outputFile = other.outputFile;
     this.tempOutputFile = other.tempOutputFile;
     this.dotdFile = other.dotdFile;
@@ -150,7 +149,8 @@ public class CppCompileActionBuilder {
     this.nocopts.addAll(other.nocopts);
     this.analysisEnvironment = other.analysisEnvironment;
     this.extraSystemIncludePrefixes = ImmutableList.copyOf(other.extraSystemIncludePrefixes);
-    this.enableModules = other.enableModules;
+    this.enableLayeringCheck = other.enableLayeringCheck;
+    this.compileHeaderModules = other.compileHeaderModules;
     this.includeResolver = other.includeResolver;
     this.actionClassId = other.actionClassId;
     this.actionContext = other.actionContext;
@@ -182,8 +182,8 @@ public class CppCompileActionBuilder {
       CppConfiguration cppConfiguration) {
 
     // Only create .dwo's for .o compilations (i.e. not .ii or .S).
-    boolean isObjectOutput = CppFileTypes.OBJECT_FILE.matches(outputFile.getPath())
-        || CppFileTypes.PIC_OBJECT_FILE.matches(outputFile.getPath());
+    boolean isObjectOutput = CppFileTypes.OBJECT_FILE.matches(outputFile.getExecPath())
+        || CppFileTypes.PIC_OBJECT_FILE.matches(outputFile.getExecPath());
 
     // Note configurations can be null for tests.
     if (cppConfiguration != null && cppConfiguration.useFission() && isObjectOutput) {
@@ -219,11 +219,11 @@ public class CppCompileActionBuilder {
     return lipoScannableMap == null ? ImmutableList.<IncludeScannable>of() : Iterables.filter(
         Iterables.transform(
             Iterables.filter(
-                Artifact.asPathFragments(FileType.filter(
+                FileType.filter(
                     realMandatoryInputs,
                     CppFileTypes.C_SOURCE, CppFileTypes.CPP_SOURCE,
-                    CppFileTypes.ASSEMBLER_WITH_C_PREPROCESSOR)),
-                Predicates.not(Predicates.equalTo(getSourceFile().getExecPath()))),
+                    CppFileTypes.ASSEMBLER_WITH_C_PREPROCESSOR),
+                Predicates.not(Predicates.equalTo(getSourceFile()))),
             Functions.forMap(lipoScannableMap, null)),
         Predicates.notNull());
   }
@@ -254,20 +254,20 @@ public class CppCompileActionBuilder {
           sourceFile, sourceLabel, realMandatoryInputsBuilder.build(), outputFile, tempOutputFile,
           dotdFile, configuration, cppConfiguration, context, ImmutableList.copyOf(copts),
           ImmutableList.copyOf(pluginOpts), getNocoptPredicate(nocopts),
-          extraSystemIncludePrefixes, enableModules, fdoBuildStamp);
+          extraSystemIncludePrefixes, enableLayeringCheck, fdoBuildStamp);
     } else {
       NestedSet<Artifact> realMandatoryInputs = realMandatoryInputsBuilder.build();
-      PathFragment sourceExecPath = getSourceFile().getExecPath();
 
       return new CppCompileAction(owner, ImmutableList.copyOf(features),
           sourceFile, sourceLabel, realMandatoryInputs, outputFile, dotdFile,
           gcnoFile, getDwoFile(outputFile, analysisEnvironment, cppConfiguration),
-          optionalInputsBuilder.build(), configuration, cppConfiguration, context,
+          optionalSourceFile, configuration, cppConfiguration, context,
           actionContext, ImmutableList.copyOf(copts),
           ImmutableList.copyOf(pluginOpts),
           getNocoptPredicate(nocopts),
-          extraSystemIncludePrefixes, enableModules, fdoBuildStamp,
-          includeResolver, getLipoScannables(realMandatoryInputs), actionClassId);
+          extraSystemIncludePrefixes, enableLayeringCheck, fdoBuildStamp,
+          includeResolver, getLipoScannables(realMandatoryInputs), actionClassId,
+          compileHeaderModules);
     }
   }
 
@@ -308,8 +308,14 @@ public class CppCompileActionBuilder {
     return this;
   }
 
-  public CppCompileActionBuilder addOptionalInput(Artifact artifact) {
-    optionalInputsBuilder.add(artifact);
+  /**
+   * Set an optional source file (usually with metadata of the main source file). The optional
+   * source file can only be set once, whether via this method or through the constructor
+   * {@link #CppCompileActionBuilder(CppCompileActionBuilder)}.
+   */
+  public CppCompileActionBuilder addOptionalSourceFile(Artifact artifact) {
+    Preconditions.checkState(optionalSourceFile == null, "%s %s", optionalSourceFile, artifact);
+    optionalSourceFile = artifact;
     return this;
   }
 
@@ -401,11 +407,19 @@ public class CppCompileActionBuilder {
     return this;
   }
 
-  public CppCompileActionBuilder setEnableModules(boolean enableModules) {
-    this.enableModules = enableModules;
+  public CppCompileActionBuilder setEnableLayeringCheck(boolean enableLayeringCheck) {
+    this.enableLayeringCheck = enableLayeringCheck;
     return this;
   }
 
+  /**
+   * Sets whether the CompileAction should use header modules for its compilation.
+   */
+  public CppCompileActionBuilder setCompileHeaderModules(boolean compileHeaderModules) {
+    this.compileHeaderModules = compileHeaderModules;
+    return this;
+  }
+  
   public CppCompileActionBuilder setFdoBuildStamp(String fdoBuildStamp) {
     this.fdoBuildStamp = fdoBuildStamp;
     return this;

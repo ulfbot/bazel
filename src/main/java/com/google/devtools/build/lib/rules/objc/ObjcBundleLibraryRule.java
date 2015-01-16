@@ -18,12 +18,12 @@ import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.Type.LABEL;
 import static com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.PLIST_TYPE;
 
+import com.google.devtools.build.lib.analysis.BlazeRule;
+import com.google.devtools.build.lib.analysis.RuleDefinition;
+import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder;
-import com.google.devtools.build.lib.view.BlazeRule;
-import com.google.devtools.build.lib.view.RuleDefinition;
-import com.google.devtools.build.lib.view.RuleDefinitionEnvironment;
 
 /**
  * Rule definition for objc_bundle_library.
@@ -37,17 +37,27 @@ public class ObjcBundleLibraryRule implements RuleDefinition {
     return builder
         /*<!-- #BLAZE_RULE(objc_bundle_library).IMPLICIT_OUTPUTS -->
         <ul>
-         <li><code><var>name</var>.xcodeproj/project.pbxproj: An Xcode project file which can be
-             used to develop or build on a Mac.</li>
+         <li><code><var>name</var>.xcodeproj/project.pbxproj</code>: An Xcode project file which
+         can be used to develop or build on a Mac.</li>
         </ul>
         <!-- #END_BLAZE_RULE.IMPLICIT_OUTPUTS -->*/
         .setImplicitOutputsFunction(ImplicitOutputsFunction.fromFunctions(ObjcRuleClasses.PBXPROJ))
         /* <!-- #BLAZE_RULE(objc_bundle_library).ATTRIBUTE(infoplist) -->
         The infoplist file. This corresponds to <i>appname</i>-Info.plist in Xcode projects.
         ${SYNOPSIS}
+        Blaze will perform variable substitution on the plist file for the following values:
+        <ul>
+          <li><code>${EXECUTABLE_NAME}</code>: The name of the executable generated and included
+              in the bundle by blaze, which can be used as the value for
+              <code>CFBundleExecutable</code> within the plist.
+          <li><code>${BUNDLE_NAME}</code>: This target's name and bundle suffix (.bundle or .app)
+              in the form<code><var>name</var></code>.<code>suffix</code>.
+          <li><code>${PRODUCT_NAME}</code>: This target's name.
+        </ul>
         <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
         .add(attr("infoplist", LABEL)
             .allowedFileTypes(PLIST_TYPE))
+        .removeAttribute("alwayslink")
         .build();
   }
 }

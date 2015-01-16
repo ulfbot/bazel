@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.buildtool;
 
+import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
@@ -21,6 +22,9 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedSet;
 import com.google.devtools.build.lib.Constants;
+import com.google.devtools.build.lib.analysis.BuildView;
+import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
+import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.blaze.BlazeCommandEventHandler;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
 import com.google.devtools.build.lib.pkgcache.LoadingPhaseRunner;
@@ -28,9 +32,6 @@ import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
 import com.google.devtools.build.lib.util.OptionsUtils;
 import com.google.devtools.build.lib.util.io.OutErr;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.BuildView;
-import com.google.devtools.build.lib.view.TopLevelArtifactContext;
-import com.google.devtools.build.lib.view.config.InvalidConfigurationException;
 import com.google.devtools.common.options.Converter;
 import com.google.devtools.common.options.Converters;
 import com.google.devtools.common.options.Converters.RangeConverter;
@@ -159,6 +160,8 @@ public class BuildRequest implements OptionsClassProvider {
     public boolean dumpProviders;
 
     @Option(name = "incremental_builder",
+            deprecationWarning = "incremental_builder is now a no-op and will be removed in an"
+            + " upcoming Blaze release",
             defaultValue = "true",
             category = "strategy",
             help = "Enables an incremental builder aimed at faster "
@@ -296,7 +299,7 @@ public class BuildRequest implements OptionsClassProvider {
   private static final int JOBS_TOO_HIGH_WARNING = 1000;
 
   private final UUID id;
-  private final LoadingCache<Class<? extends OptionsBase>, OptionsBase> optionsCache;
+  private final LoadingCache<Class<? extends OptionsBase>, Optional<OptionsBase>> optionsCache;
 
   /** A human-readable description of all the non-default option settings. */
   private final String optionsDescription;
@@ -336,15 +339,15 @@ public class BuildRequest implements OptionsClassProvider {
     this.id = id;
     this.startTimeMillis = startTimeMillis;
     this.optionsCache = CacheBuilder.newBuilder()
-        .build(new CacheLoader<Class<? extends OptionsBase>, OptionsBase>() {
+        .build(new CacheLoader<Class<? extends OptionsBase>, Optional<OptionsBase>>() {
           @Override
-          public OptionsBase load(Class<? extends OptionsBase> key) throws Exception {
+          public Optional<OptionsBase> load(Class<? extends OptionsBase> key) throws Exception {
             OptionsBase result = options.getOptions(key);
-            if (result == null) {
+            if (result == null && startupOptions != null) {
               result = startupOptions.getOptions(key);
             }
 
-            return result;
+            return Optional.fromNullable(result);
           }
         });
 
@@ -413,7 +416,7 @@ public class BuildRequest implements OptionsClassProvider {
   @SuppressWarnings("unchecked")
   public <T extends OptionsBase> T getOptions(Class<T> clazz) {
     try {
-      return (T) optionsCache.get(clazz);
+      return (T) optionsCache.get(clazz).orNull();
     } catch (ExecutionException e) {
       throw new IllegalStateException(e);
     }
@@ -503,7 +506,7 @@ public class BuildRequest implements OptionsClassProvider {
     return new TopLevelArtifactContext(getCommandName(),
         getBuildOptions().compileOnly, getBuildOptions().compilationPrerequisitesOnly,
         getOptions(ExecutionOptions.class).testStrategy.equals("exclusive"),
-        ImmutableSet.<String>copyOf(getBuildOptions().outputGroups));
+        ImmutableSet.<String>copyOf(getBuildOptions().outputGroups), shouldRunTests());
   }
 
   public String getSymlinkPrefix() {

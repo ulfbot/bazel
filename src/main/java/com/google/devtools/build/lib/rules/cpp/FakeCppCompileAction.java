@@ -29,9 +29,8 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.Executor;
 import com.google.devtools.build.lib.actions.ResourceSet;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
-import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadCompatible;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.syntax.Label;
@@ -39,7 +38,6 @@ import com.google.devtools.build.lib.util.ShellEscaper;
 import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
 
 import java.io.IOException;
 import java.util.UUID;
@@ -74,10 +72,10 @@ public class FakeCppCompileAction extends CppCompileAction {
       ImmutableList<String> pluginOpts,
       Predicate<String> nocopts,
       ImmutableList<PathFragment> extraSystemIncludePrefixes,
-      boolean enableModules,
+      boolean enableLayeringCheck,
       @Nullable String fdoBuildStamp) {
     super(owner, features, sourceFile, sourceLabel, mandatoryInputs, outputFile,
-        dotdFile, null, null, NestedSetBuilder.<Artifact>emptySet(Order.STABLE_ORDER),
+        dotdFile, null, null, null,
         configuration, cppConfiguration,
         // We only allow inclusion of header files explicitly declared in
         // "srcs", so we only use declaredIncludeSrcs, not declaredIncludeDirs.
@@ -87,9 +85,9 @@ public class FakeCppCompileAction extends CppCompileAction {
         // the cc_fake_binary, and the runfiles must be determined at analysis
         // time, so they can't depend on the contents of the ".d" file.)
         CppCompilationContext.disallowUndeclaredHeaders(context), null, copts, pluginOpts, nocopts,
-        extraSystemIncludePrefixes, enableModules, fdoBuildStamp, VOID_INCLUDE_RESOLVER,
+        extraSystemIncludePrefixes, enableLayeringCheck, fdoBuildStamp, VOID_INCLUDE_RESOLVER,
         ImmutableList.<IncludeScannable>of(),
-        GUID);
+        GUID, /*compileHeaderModules=*/false);
     this.tempOutputFile = Preconditions.checkNotNull(tempOutputFile);
   }
 

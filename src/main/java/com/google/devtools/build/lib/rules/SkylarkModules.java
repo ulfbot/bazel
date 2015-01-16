@@ -17,6 +17,7 @@ package com.google.devtools.build.lib.rules;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.collect.CollectionUtils;
+import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.packages.MethodLibrary;
 import com.google.devtools.build.lib.syntax.Environment;
 import com.google.devtools.build.lib.syntax.Function;
@@ -69,8 +70,8 @@ public class SkylarkModules {
   /**
    * Returns a new SkylarkEnvironment with the elements of the Skylark modules.
    */
-  public static SkylarkEnvironment getNewEnvironment() {
-    SkylarkEnvironment env = new SkylarkEnvironment();
+  public static SkylarkEnvironment getNewEnvironment(EventHandler eventHandler) {
+    SkylarkEnvironment env = new SkylarkEnvironment(eventHandler);
     setupEnvironment(env);
     return env;
   }
@@ -113,6 +114,7 @@ public class SkylarkModules {
             SkylarkType.of(moduleClass));
       }
     }
+    global.put("native", SkylarkType.UNKNOWN);
     MethodLibrary.setupValidationEnvironment(builtIn);
     for (Class<?> module : MODULES) {
       collectSkylarkTypesFromFields(module, builtIn);
@@ -170,7 +172,7 @@ public class SkylarkModules {
               builtIn.put(objectType, new HashMap<String, SkylarkType>());
             }
             // TODO(bazel-team): add parameters to SkylarkFunctionType
-            SkylarkType returnType = getReturnType(annotation);
+            SkylarkType returnType = SkylarkType.getReturnType(annotation);
             builtIn.get(objectType).put(annotation.name(),
                 SkylarkFunctionType.of(annotation.name(), returnType));
           } catch (IllegalArgumentException e) {
@@ -185,10 +187,5 @@ public class SkylarkModules {
         }
       }
     }
-  }
-
-  private static SkylarkType getReturnType(SkylarkBuiltin annotation) {
-    return annotation.returnType().equals(Object.class)
-        ? SkylarkType.UNKNOWN : SkylarkType.of(annotation.returnType());
   }
 }

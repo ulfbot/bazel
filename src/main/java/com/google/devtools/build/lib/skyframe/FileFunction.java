@@ -22,6 +22,7 @@ import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
+import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 
@@ -59,7 +60,7 @@ public class FileFunction implements SkyFunction {
     // informative error message than we'd get doing bogus filesystem operations.
     if (!relativePath.equals(PathFragment.EMPTY_FRAGMENT)) {
       Pair<RootedPath, FileStateValue> resolvedState =
-          resolveFromAncestors(rootedPath, env, skyKey);
+          resolveFromAncestors(rootedPath, env);
       if (resolvedState == null) {
         return null;
       }
@@ -86,10 +87,10 @@ public class FileFunction implements SkyFunction {
           // exactly once.
           return null;
         }
-        throw new FileFunctionException(skyKey, fileSymlinkCycleException);
+        throw new FileFunctionException(fileSymlinkCycleException);
       }
       Pair<RootedPath, FileStateValue> resolvedState = getSymlinkTargetRootedPath(realRootedPath,
-          realFileStateValue.getSymlinkTarget(), env, skyKey);
+          realFileStateValue.getSymlinkTarget(), env);
       if (resolvedState == null) {
         return null;
       }
@@ -105,7 +106,7 @@ public class FileFunction implements SkyFunction {
    */
   @Nullable
   private Pair<RootedPath, FileStateValue> resolveFromAncestors(RootedPath rootedPath,
-      Environment env, SkyKey key) throws FileFunctionException {
+      Environment env) throws FileFunctionException {
     PathFragment relativePath = rootedPath.getRelativePath();
     RootedPath realRootedPath = rootedPath;
     FileValue parentFileValue = null;
@@ -131,7 +132,8 @@ public class FileFunction implements SkyFunction {
       String type = realFileStateValue.getType().toString().toLowerCase();
       String message = type + " " + rootedPath.asPath() + " exists but its parent "
           + "directory " + parentFileValue.realRootedPath().asPath() + " doesn't exist.";
-      throw new FileFunctionException(key, new InconsistentFilesystemException(message));
+      throw new FileFunctionException(new InconsistentFilesystemException(message),
+          Transience.TRANSIENT);
     }
     return Pair.of(realRootedPath, realFileStateValue);
   }
@@ -143,13 +145,12 @@ public class FileFunction implements SkyFunction {
    */
   @Nullable
   private Pair<RootedPath, FileStateValue> getSymlinkTargetRootedPath(RootedPath rootedPath,
-      PathFragment symlinkTarget, Environment env, SkyKey key) throws FileFunctionException {
+      PathFragment symlinkTarget, Environment env) throws FileFunctionException {
     if (symlinkTarget.isAbsolute()) {
       Path path = rootedPath.asPath().getFileSystem().getRootDirectory().getRelative(
           symlinkTarget);
       return resolveFromAncestors(
-          RootedPath.toRootedPathMaybeUnderRoot(path, pkgLocator.get().getPathEntries()), env,
-          key);
+          RootedPath.toRootedPathMaybeUnderRoot(path, pkgLocator.get().getPathEntries()), env);
     }
     Path path = rootedPath.asPath();
     Path symlinkTargetPath;
@@ -167,7 +168,7 @@ public class FileFunction implements SkyFunction {
     }
     RootedPath symlinkTargetRootedPath = RootedPath.toRootedPathMaybeUnderRoot(symlinkTargetPath,
         pkgLocator.get().getPathEntries());
-    return resolveFromAncestors(symlinkTargetRootedPath, env, key);
+    return resolveFromAncestors(symlinkTargetRootedPath, env);
   }
 
   private FileSymlinkCycleException makeFileSymlinkCycleException(RootedPath startOfCycle,
@@ -200,12 +201,12 @@ public class FileFunction implements SkyFunction {
    */
   private static final class FileFunctionException extends SkyFunctionException {
 
-    public FileFunctionException(SkyKey key, InconsistentFilesystemException e) {
-      super(key, e, /*isTransient=*/true);
+    public FileFunctionException(InconsistentFilesystemException e, Transience transience) {
+      super(e, transience);
     }
 
-    public FileFunctionException(SkyKey key, FileSymlinkCycleException e) {
-      super(key, e);
+    public FileFunctionException(FileSymlinkCycleException e) {
+      super(e, Transience.PERSISTENT);
     }
   }
 }

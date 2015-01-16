@@ -27,8 +27,10 @@ import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.AbstractAction;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionExecutionException;
+import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.ArtifactResolver;
 import com.google.devtools.build.lib.actions.EnvironmentalExecException;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.Executor;
@@ -37,6 +39,10 @@ import com.google.devtools.build.lib.actions.ParameterFile.ParameterFileType;
 import com.google.devtools.build.lib.actions.ResourceSet;
 import com.google.devtools.build.lib.actions.extra.CppLinkInfo;
 import com.google.devtools.build.lib.actions.extra.ExtraActionInfo;
+import com.google.devtools.build.lib.analysis.AnalysisEnvironment;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.collect.CollectionUtils;
 import com.google.devtools.build.lib.collect.ImmutableIterable;
 import com.google.devtools.build.lib.collect.IterablesChain;
@@ -46,6 +52,8 @@ import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadCompatible;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
+import com.google.devtools.build.lib.profiler.Profiler;
+import com.google.devtools.build.lib.profiler.ProfilerTask;
 import com.google.devtools.build.lib.rules.cpp.Link.LinkStaticness;
 import com.google.devtools.build.lib.rules.cpp.Link.LinkTargetType;
 import com.google.devtools.build.lib.rules.cpp.LinkerInputs.LibraryToLink;
@@ -55,10 +63,6 @@ import com.google.devtools.build.lib.util.ShellEscaper;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.AnalysisEnvironment;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.TransitiveInfoProvider;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -84,6 +88,15 @@ public final class CppLinkAction extends AbstractAction implements IncludeScanna
 
   /** True for cc_fake_binary targets. */
   private final boolean fake;
+
+  /**
+   * Set when the action prepares for execution. Used to preserve state between preparation and
+   * execution, and to update this action's inputs.
+   */
+  private Collection<Artifact> additionalInputs;
+
+  private final Iterable<Artifact> mandatoryInputs;
+  private boolean inputsKnown;
 
   // Linking uses a lot of memory; estimate 1 MB per input file, min 1.5 Gib.
   // It is vital to not underestimate too much here,
@@ -115,12 +128,19 @@ public final class CppLinkAction extends AbstractAction implements IncludeScanna
                         boolean fake,
                         LinkCommandLine linkCommandLine) {
     super(owner, inputs, outputs);
+    this.mandatoryInputs = inputs;
     this.cppConfiguration = cppConfiguration;
     this.outputLibrary = outputLibrary;
     this.interfaceOutputLibrary = interfaceOutputLibrary;
     this.fake = fake;
 
     this.linkCommandLine = linkCommandLine;
+    inputsKnown = !discoversInputs();
+    // If not scanning includes, this set is never calculated, but it is retrieved, so we keep
+    // it an empty set.
+    this.additionalInputs = cppConfiguration.shouldScanIncludes()
+        ? null
+        : ImmutableList.<Artifact>of();
   }
 
   private static Iterable<LinkerInput> filterLinkerInputs(Iterable<LinkerInput> inputs) {
@@ -157,6 +177,10 @@ public final class CppLinkAction extends AbstractAction implements IncludeScanna
   @VisibleForTesting
   public String getTargetCpu() {
     return getCppConfiguration().getTargetCpu();
+  }
+
+  public String getHostSystemName() {
+    return getCppConfiguration().getHostSystemName();
   }
 
   /**
@@ -237,14 +261,11 @@ public final class CppLinkAction extends AbstractAction implements IncludeScanna
     paramFile.writeContent(paramFileArgs);
 
     // Normally Blaze chmods all output files automatically (see
-    // AbstractActionExecutor#setOutputsReadOnlyAndExecutable), but this params file is created
-    // out-of-band and is not declared as an output.  By chmodding the file, other processes
+    // SkyframeActionExecutor#setOutputsReadOnlyAndExecutable), but this params file is created
+    // out-of-band and is not declared as an output. By chmodding the file, other processes
     // can observe this file being created.
     try {
-      // TODO(bazel-team): Reenable after 2014-10-01. This breaks past Blaze versions if run in
-      // the same workspace, because they do not expect the file to be readonly, see bug
-      // ".params file permission crash on transition ..."
-      // paramFilePath.setWritable(false);
+      paramFilePath.setWritable(false);
       paramFilePath.setExecutable(true);  // for consistency with other action outputs
     } catch (IOException e) {
       throw new EnvironmentalExecException("could not chmod param file '" + paramFilePath + "'", e);
@@ -264,9 +285,16 @@ public final class CppLinkAction extends AbstractAction implements IncludeScanna
       try {
         executor.getContext(CppLinkActionContext.class).exec(
             this, actionExecutionContext);
+        updateActionInputs(executor.getContext(IncludeScanningContext.class).getArtifactResolver(),
+            additionalInputs);
       } catch (ExecException e) {
         throw e.toActionExecutionException("Linking of rule '" + getOwner().getLabel() + "'",
             executor.getVerboseFailures(), this);
+      } finally {
+        if (cppConfiguration.shouldScanIncludes()) {
+          // If scanning includes, reset discovered inputs.
+          additionalInputs = null;
+        }
       }
     }
   }
@@ -316,7 +344,7 @@ public final class CppLinkAction extends AbstractAction implements IncludeScanna
       s.append(getOutputFile().getBaseName()).append(": ");
       for (Artifact linkstamp : linkstampOutputs) {
         s.append("mkdir -p " + outputPrefix +
-            linkstamp.getExecPath().getParentDirectory().toString() + " && ");
+            linkstamp.getExecPath().getParentDirectory() + " && ");
       }
       Joiner.on(' ').appendTo(s,
           ShellEscaper.escapeAll(linkCommandLine.finalizeAlreadyEscapedWithLinkstampCommands(
@@ -488,8 +516,8 @@ public final class CppLinkAction extends AbstractAction implements IncludeScanna
   }
 
   @Override
-  public List<PathFragment> getIncludeScannerSources() {
-    return Artifact.asPathFragments(getLinkCommandLine().getLinkstamps().keySet());
+  public Collection<Artifact> getIncludeScannerSources() {
+    return getLinkCommandLine().getLinkstamps().keySet();
   }
 
   @Override
@@ -498,8 +526,88 @@ public final class CppLinkAction extends AbstractAction implements IncludeScanna
   }
 
   @Override
-  public Map<Path, Path> getLegalGeneratedScannerFileMap() {
+  public Map<Artifact, Path> getLegalGeneratedScannerFileMap() {
     return ImmutableMap.of();
+  }
+
+
+  /** Returns the list of additional inputs found by {@link #discoverInputs}. */
+  public Collection<Artifact> getAdditionalInputs() {
+    return Preconditions.checkNotNull(additionalInputs);
+  }
+
+  @Override
+  public void discoverInputs(ActionExecutionContext actionExecutionContext)
+      throws ActionExecutionException, InterruptedException {
+    Executor executor = actionExecutionContext.getExecutor();
+    try {
+      this.additionalInputs = executor.getContext(CppLinkActionContext.class)
+          .findAdditionalInputs(this, actionExecutionContext);
+    } catch (ExecException e) {
+      throw e.toActionExecutionException(getProgressMessage(), executor.getVerboseFailures(), this);
+    }
+  }
+
+  @Override
+  public void updateInputsFromCache(ArtifactResolver artifactResolver,
+      Collection<PathFragment> inputPaths) {
+    ImmutableList<Artifact> foundInputs =
+        DiscoveredSourceInputsHelper.getDiscoveredInputsFromPaths(mandatoryInputs, artifactResolver,
+            inputPaths);
+    inputsKnown = true;
+    synchronized (this) {
+      setInputs(
+          IterablesChain.<Artifact>builder().add(mandatoryInputs).add(foundInputs).build());
+    }
+  }
+
+  /**
+   * Update the inputs of the link action. This is necessary because the linkstamp cc file may
+   * #include undeclared headers, which may change inter-build. Since we do not allow derived
+   * artifacts to be included (see {@link #getLegalGeneratedScannerFileMap}), we need only resolve
+   * the additional source files that were found into artifacts.
+   */
+  private void updateActionInputs(ArtifactResolver artifactResolver,
+      Iterable<? extends ActionInput> newInputs)
+      throws ActionExecutionException {
+    if (!getCppConfiguration().shouldScanIncludes()) {
+      return;
+    }
+    inputsKnown = false;
+    Profiler.instance().startTask(ProfilerTask.ACTION_UPDATE, this);
+    Iterable<Artifact> foundInputs = ImmutableList.of();
+    try {
+      // cppConfiguration.getBuiltInIncludeDirectories() determines prefixes of allowed absolute
+      // inclusions. We do not bother to look at the "extraSystemIncludePrefixes" of
+      // CppCompileAction that correspond to the gccPluginDirectory specified by the crosstool.
+      foundInputs = DiscoveredSourceInputsHelper.getDiscoveredInputsFromActionInputs(
+          mandatoryInputs, artifactResolver, newInputs,
+          getCppConfiguration().getBuiltInIncludeDirectories(), this, getPrimaryOutput());
+      inputsKnown = true;
+    } finally {
+      synchronized (this) {
+        setInputs(IterablesChain.<Artifact>builder().add(mandatoryInputs).add(foundInputs).build());
+      }
+      Profiler.instance().completeTask(ProfilerTask.ACTION_UPDATE);
+    }
+
+  }
+
+  @Override
+  public boolean inputsKnown() {
+    return inputsKnown;
+  }
+
+  @Override
+  public boolean discoversInputs() {
+    // Fake binaries don't actually use the contents of the linkstamp files, so they don't depend on
+    // any files those files might include.
+    return !fake && getCppConfiguration().shouldScanIncludes();
+  }
+
+  @Override
+  public Iterable<Artifact> getMandatoryInputs() {
+    return mandatoryInputs;
   }
 
   /**
@@ -869,9 +977,9 @@ public final class CppLinkAction extends AbstractAction implements IncludeScanna
     private void addNonLibraryInput(LinkerInput input) {
       String name = input.getArtifact().getFilename();
       Preconditions.checkArgument(
-          !Link.ARCHIVE_LIBRARY_FILETYPES.matches(name) &&
-          !Link.SHARED_LIBRARY_FILETYPES.matches(name),
-          "'" + input.toString() + "' is a library file");
+          !Link.ARCHIVE_LIBRARY_FILETYPES.matches(name)
+          && !Link.SHARED_LIBRARY_FILETYPES.matches(name),
+          "'%s' is a library file", input);
       this.nonLibraries.add(input);
     }
     /**
@@ -1100,7 +1208,7 @@ public final class CppLinkAction extends AbstractAction implements IncludeScanna
      * @param builder a mutable {@link CppLinkAction.Builder} to clone from
      */
     public Context(Builder builder) {
-      this.nonLibraries = ImmutableSet.<LinkerInput>builder().addAll(builder.nonLibraries).build();
+      this.nonLibraries = ImmutableSet.copyOf(builder.nonLibraries);
       this.libraries = NestedSetBuilder.<LibraryToLink>linkOrder()
           .addTransitive(builder.libraries.build()).build();
       this.crosstoolInputs =
@@ -1110,8 +1218,8 @@ public final class CppLinkAction extends AbstractAction implements IncludeScanna
           NestedSetBuilder.<Artifact>stableOrder().addTransitive(builder.runtimeInputs).build();
       this.compilationInputs = NestedSetBuilder.<Artifact>stableOrder()
           .addTransitive(builder.compilationInputs.build()).build();
-      this.linkstamps = ImmutableSet.<Artifact>builder().addAll(builder.linkstamps).build();
-      this.linkopts = ImmutableList.<String>builder().addAll(builder.linkopts).build();
+      this.linkstamps = ImmutableSet.copyOf(builder.linkstamps);
+      this.linkopts = ImmutableList.copyOf(builder.linkopts);
       this.linkType = builder.linkType;
       this.linkStaticness = builder.linkStaticness;
       this.fake = builder.fake;

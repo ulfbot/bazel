@@ -692,8 +692,8 @@ public final class Profiler {
    */
   private void logTask(long startTime, long duration, ProfilerTask type, Object object) {
     Preconditions.checkNotNull(object);
-    Preconditions.checkState(startTime > 0);
-    Preconditions.checkState(duration >= 0);
+    Preconditions.checkState(startTime > 0, "startTime was " + startTime);
+    Preconditions.checkState(duration >= 0, "duration was " + duration);
 
     TaskData parent = taskStack.peek();
     if (parent != null) {
@@ -837,15 +837,6 @@ public final class Profiler {
           aggregator.add(data);
         }
       }
-    }
-  }
-
-  /**
-   * Convenience method to log exceptions.
-   */
-  public void logException(Exception exception) {
-    if (isActive() && isProfiling(ProfilerTask.EXCEPTION)) {
-      logEvent(ProfilerTask.EXCEPTION, exception.toString());
     }
   }
 

@@ -15,12 +15,14 @@
 package com.google.devtools.build.xcode.plmerge;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.io.ByteSource;
 import com.google.devtools.build.xcode.common.Platform;
 import com.google.devtools.build.xcode.common.TargetDeviceFamily;
+import com.google.devtools.build.xcode.util.Equaling;
 import com.google.devtools.build.xcode.util.Intersection;
 import com.google.devtools.build.xcode.util.Mapping;
 import com.google.devtools.build.xcode.util.Value;
@@ -29,11 +31,13 @@ import com.dd.plist.BinaryPropertyListWriter;
 import com.dd.plist.NSArray;
 import com.dd.plist.NSDictionary;
 import com.dd.plist.NSObject;
+import com.dd.plist.NSString;
 import com.dd.plist.PropertyListFormatException;
 import com.dd.plist.PropertyListParser;
 
 import org.xml.sax.SAXException;
 
+import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -41,15 +45,27 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.text.ParseException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
 import javax.xml.parsers.ParserConfigurationException;
 
 /**
  * Utility code for merging project files.
  */
 public class PlistMerging extends Value<PlistMerging> {
+
+  /**
+   * Exception type thrown when validation of the plist file fails.
+   */
+  public static class ValidationException extends RuntimeException {
+    ValidationException(String message) {
+      super(message);
+    }
+  }
+
   private final NSDictionary merged;
 
   @VisibleForTesting
@@ -73,12 +89,7 @@ public class PlistMerging extends Value<PlistMerging> {
 
   @VisibleForTesting
   public static NSDictionary readPlistFile(final Path sourceFilePath) throws IOException {
-    ByteSource rawBytes = new ByteSource() {
-      @Override
-      public InputStream openStream() throws IOException {
-        return Files.newInputStream(sourceFilePath);
-      }
-    };
+    ByteSource rawBytes = new Utf8BomSkippingByteSource(sourceFilePath);
 
     try {
       try (InputStream in = rawBytes.openStream()) {
@@ -168,7 +179,8 @@ public class PlistMerging extends Value<PlistMerging> {
    * "automatic" entries in the Plist.
    */
   public static PlistMerging from(List<Path> sourceFiles, Map<String, NSObject> automaticEntries,
-      Map<String, String> substitutions) throws IOException {
+      Map<String, String> substitutions, KeysToRemoveIfEmptyString keysToRemoveIfEmptyString)
+          throws IOException {
     NSDictionary merged = PlistMerging.merge(sourceFiles);
 
     Set<String> conflictingEntries = Intersection.of(automaticEntries.keySet(), merged.keySet());
@@ -177,27 +189,95 @@ public class PlistMerging extends Value<PlistMerging> {
         + "input lists: %s", conflictingEntries);
     merged.putAll(automaticEntries);
 
-    for (String key : merged.keySet()) {
-      NSObject entry = merged.get(key);
-      if (entry.toJavaObject() instanceof String) {
+    for (Map.Entry<String, NSObject> entry : merged.entrySet()) {
+      if (entry.getValue().toJavaObject() instanceof String) {
         String newValue = substituteEnvironmentVariable(
-            substitutions, (String) entry.toJavaObject());
-        merged.put(key, newValue);
+            substitutions, (String) entry.getValue().toJavaObject());
+        merged.put(entry.getKey(), newValue);
+      }
+    }
+
+    for (String key : keysToRemoveIfEmptyString) {
+      if (Equaling.of(Mapping.of(merged, key), Optional.<NSObject>of(new NSString("")))) {
+        merged.remove(key);
       }
     }
 
     return new PlistMerging(merged);
   }
 
+  // Assume that if an RFC 1034 format string is specified, the value is RFC 1034 compliant.
   private static String substituteEnvironmentVariable(
       Map<String, String> substitutions, String string) {
     // The substitution is *not* performed recursively.
-    for (String variableName : substitutions.keySet()) {
-      string = string
-          .replace("${" + variableName + "}", substitutions.get(variableName))
-          .replace("$(" + variableName + ")", substitutions.get(variableName));
+    for (Map.Entry<String, String> variable : substitutions.entrySet()) {
+      for (String variableNameWithFormatString : withFormatStrings(variable.getKey())) {
+        string = string
+            .replace("${" + variableNameWithFormatString + "}", variable.getValue())
+            .replace("$(" + variableNameWithFormatString + ")", variable.getValue());
+      }
     }
 
     return string;
+  }
+
+  private static ImmutableSet<String> withFormatStrings(String variableName) {
+    return ImmutableSet.of(variableName, variableName + ":rfc1034identifier");
+  }
+
+  @VisibleForTesting
+  NSDictionary asDictionary() {
+    return merged;
+  }
+
+  /**
+   * Sets the given executable name on this merged plist in the {@code CFBundleExecutable}
+   * attribute.
+   *
+   * @param executableName name of the bundle executable
+   * @return this plist merging
+   * @throws ValidationException if the plist already contains an incompatible
+   *    {@code CFBundleExecutable} entry
+   */
+  public PlistMerging setExecutableName(String executableName) {
+    NSString bundleExecutable = (NSString) merged.get("CFBundleExecutable");
+
+    if (bundleExecutable == null) {
+      merged.put("CFBundleExecutable", executableName);
+    } else if (!executableName.equals(bundleExecutable.getContent())) {
+      throw new ValidationException(String.format(
+          "Blaze generated the executable %s but the Plist CFBundleExecutable is %s",
+          executableName, bundleExecutable));
+    }
+
+    return this;
+  }
+
+  private static class Utf8BomSkippingByteSource extends ByteSource {
+
+    private static final byte[] UTF8_BOM =
+        new byte[] { (byte) 0xEF, (byte) 0xBB, (byte) 0xBF };
+
+    private final Path path;
+
+    public Utf8BomSkippingByteSource(Path path) {
+      this.path = path;
+    }
+
+    @Override
+    public InputStream openStream() throws IOException {
+      InputStream stream = new BufferedInputStream(Files.newInputStream(path));
+      stream.mark(UTF8_BOM.length);
+      byte[] buffer = new byte[UTF8_BOM.length];
+      int read = stream.read(buffer);
+      stream.reset();
+      buffer = Arrays.copyOf(buffer, read);
+
+      if (UTF8_BOM.length == read && Arrays.equals(buffer, UTF8_BOM)) {
+        stream.skip(UTF8_BOM.length);
+      }
+
+      return stream;
+    }
   }
 }

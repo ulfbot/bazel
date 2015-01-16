@@ -18,12 +18,16 @@ import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.StoredEventHandler;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
+import com.google.devtools.build.lib.skyframe.ASTFileLookupValue.ASTLookupInputException;
 import com.google.devtools.build.lib.syntax.BuildFileAST;
 import com.google.devtools.build.lib.syntax.Function;
+import com.google.devtools.build.lib.syntax.Label;
+import com.google.devtools.build.lib.syntax.Label.SyntaxException;
 import com.google.devtools.build.lib.syntax.SkylarkEnvironment;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
+import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 
@@ -48,26 +52,43 @@ public class SkylarkImportLookupFunction implements SkyFunction {
   public SkyValue compute(SkyKey skyKey, Environment env) throws SkyFunctionException,
       InterruptedException {
     PathFragment file = (PathFragment) skyKey.argument();
-    SkyKey astLookupKey = ASTLookupValue.key(file);
-    ASTLookupValue astLookupValue = (ASTLookupValue) env.getValue(astLookupKey);
+    ASTFileLookupValue astLookupValue = null;
+    try {
+      SkyKey astLookupKey = ASTFileLookupValue.key(file);
+      astLookupValue = (ASTFileLookupValue) env.getValueOrThrow(astLookupKey,
+          ErrorReadingSkylarkExtensionException.class, InconsistentFilesystemException.class);
+    } catch (ErrorReadingSkylarkExtensionException e) {
+      throw new SkylarkImportLookupFunctionException(SkylarkImportFailedException.errorReadingFile(
+          file, e.getMessage()));
+    } catch (InconsistentFilesystemException e) {
+      throw new SkylarkImportLookupFunctionException(e, Transience.PERSISTENT);
+    } catch (ASTLookupInputException e) {
+      throw new SkylarkImportLookupFunctionException(e, Transience.PERSISTENT);
+    }
     if (astLookupValue == null) {
       return null;
     }
-    if (astLookupValue == ASTLookupValue.NO_FILE) {
+    if (astLookupValue == ASTFileLookupValue.NO_FILE) {
       // Skylark import files have to exist.
-      throw new SkylarkImportLookupFunctionException(skyKey,
-          new SkylarkImportFailedException(file, true));
+      throw new SkylarkImportLookupFunctionException(SkylarkImportFailedException.noFile(file));
     }
 
     Map<PathFragment, SkylarkEnvironment> importMap = new HashMap<>();
+    ImmutableList.Builder<SkylarkFileDependency> fileDependencies = ImmutableList.builder();
     BuildFileAST ast = astLookupValue.getAST();
     // TODO(bazel-team): Refactor this code and PackageFunction to reduce code duplications.
     for (PathFragment importFile : ast.getImports()) {
-      SkyKey importsLookupKey = SkylarkImportLookupValue.key(importFile);
-      SkylarkImportLookupValue importsLookupValue;
-      importsLookupValue = (SkylarkImportLookupValue) env.getValue(importsLookupKey);
-      if (importsLookupValue != null) {
-        importMap.put(importFile, importsLookupValue.getImportedEnvironment());
+      try {
+        SkyKey importsLookupKey = SkylarkImportLookupValue.key(importFile);
+        SkylarkImportLookupValue importsLookupValue;
+        importsLookupValue = (SkylarkImportLookupValue) env.getValueOrThrow(
+            importsLookupKey, ASTLookupInputException.class);
+        if (importsLookupValue != null) {
+          importMap.put(importFile, importsLookupValue.getImportedEnvironment());
+          fileDependencies.add(importsLookupValue.getDependency());
+        }
+      } catch (ASTLookupInputException e) {
+        throw new SkylarkImportLookupFunctionException(e, Transience.PERSISTENT);
       }
     }
     if (env.valuesMissing()) {
@@ -76,15 +97,28 @@ public class SkylarkImportLookupFunction implements SkyFunction {
     }
 
     if (ast.containsErrors()) {
-      throw new SkylarkImportLookupFunctionException(skyKey,
-          new SkylarkImportFailedException(file, false));
+      throw new SkylarkImportLookupFunctionException(SkylarkImportFailedException.skylarkErrors(
+          file));
     }
 
     SkylarkEnvironment extensionEnv = createEnv(ast, importMap, env);
     // Skylark UserDefinedFunctions are sharing function definition Environments, so it's extremely
     // important not to modify them from this point. Ideally they should be only used to import
     // symbols and serve as global Environments of UserDefinedFunctions.
-    return new SkylarkImportLookupValue(extensionEnv);
+    return new SkylarkImportLookupValue(extensionEnv,
+        new SkylarkFileDependency(pathFragmentToLabel(file), fileDependencies.build()));
+  }
+
+  private Label pathFragmentToLabel(PathFragment file) {
+    try {
+      // Create an absolute Label from the PathFragment: foo/bar/baz.ext --> //foo/bar:baz.ext.
+      // These are not real Labels. We only use the Labels to have a unified format for reporting.
+      return Label.parseAbsolute(
+            "//" + file.subFragment(0, file.segmentCount() - 1).getPathString()
+          + ":" + file.getBaseName());
+    } catch (SyntaxException e) {
+      throw new IllegalStateException(e);
+    }
   }
 
   /**
@@ -94,7 +128,9 @@ public class SkylarkImportLookupFunction implements SkyFunction {
   private SkylarkEnvironment createEnv(BuildFileAST ast,
       Map<PathFragment, SkylarkEnvironment> importMap, Environment env)
           throws InterruptedException {
-    SkylarkEnvironment extensionEnv = ruleClassProvider.createSkylarkRuleClassEnvironment();
+    StoredEventHandler eventHandler = new StoredEventHandler();
+    SkylarkEnvironment extensionEnv =
+        ruleClassProvider.createSkylarkRuleClassEnvironment(eventHandler);
     // Adding native rules module for build extensions.
     // TODO(bazel-team): this might not be the best place to do this.
     extensionEnv.update("native", ruleClassProvider.getNativeModule());
@@ -103,7 +139,6 @@ public class SkylarkImportLookupFunction implements SkyFunction {
             ruleClassProvider.getNativeModule().getClass(), function.getName(), function);
     }
     extensionEnv.setImportedExtensions(importMap);
-    StoredEventHandler eventHandler = new StoredEventHandler();
     ast.exec(extensionEnv, eventHandler);
     // Don't fail just replay the events so the original package lookup can fail.
     Event.replayEventsOn(env.getListener(), eventHandler.getEvents());
@@ -116,16 +151,38 @@ public class SkylarkImportLookupFunction implements SkyFunction {
   }
 
   static final class SkylarkImportFailedException extends Exception {
-    private SkylarkImportFailedException(PathFragment file, boolean found) {
-      super(found
-          ? String.format("Extension file not found: '%s'", file)
-          : String.format("Extension '%s' has errors", file));
+    private SkylarkImportFailedException(String errorMessage) {
+      super(errorMessage);
+    }
+
+    public static SkylarkImportFailedException errorReadingFile(PathFragment file, String error) {
+      return new SkylarkImportFailedException(
+          String.format("Encountered error while reading extension file '%s': %s", file, error));
+    }
+
+    public static SkylarkImportFailedException noFile(PathFragment file) {
+      return new SkylarkImportFailedException(
+          String.format("Extension file not found: '%s'", file));
+    }
+
+    public static SkylarkImportFailedException skylarkErrors(PathFragment file) {
+      return new SkylarkImportFailedException(String.format("Extension '%s' has errors", file));
     }
   }
 
   private static final class SkylarkImportLookupFunctionException extends SkyFunctionException {
-    private SkylarkImportLookupFunctionException(SkyKey key, SkylarkImportFailedException cause) {
-      super(key, cause);
+    private SkylarkImportLookupFunctionException(SkylarkImportFailedException cause) {
+      super(cause, Transience.PERSISTENT);
+    }
+
+    private SkylarkImportLookupFunctionException(InconsistentFilesystemException e,
+        Transience transience) {
+      super(e, transience);
+    }
+
+    private SkylarkImportLookupFunctionException(ASTLookupInputException e,
+        Transience transience) {
+      super(e, transience);
     }
   }
 }

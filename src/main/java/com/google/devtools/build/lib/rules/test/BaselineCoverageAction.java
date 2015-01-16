@@ -21,12 +21,12 @@ import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Executor;
 import com.google.devtools.build.lib.actions.NotifyOnActionCacheHit;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.Util;
+import com.google.devtools.build.lib.analysis.actions.AbstractFileWriteAction;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.util.Fingerprint;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.Util;
-import com.google.devtools.build.lib.view.actions.AbstractFileWriteAction;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -79,14 +79,23 @@ public class BaselineCoverageAction extends AbstractFileWriteAction
   }
 
   @Override
-  public void writeOutputFile(OutputStream out, EventHandler eventHandler,
-      Executor executor) throws IOException, InterruptedException {
-    PrintWriter writer = new PrintWriter(out);
-    for (String execPath : getInstrumentedFilePathStrings()) {
-      writer.write("SF:" + execPath + "\n");
-      writer.write("end_of_record\n");
-    }
-    writer.flush();
+  public DeterministicWriter newDeterministicWriter(EventHandler eventHandler,
+      Executor executor) {
+    return new DeterministicWriter() {
+      @Override
+      public void writeOutputFile(OutputStream out) throws IOException {
+        PrintWriter writer = new PrintWriter(out);
+        for (String execPath : getInstrumentedFilePathStrings()) {
+          writer.write("SF:" + execPath + "\n");
+          writer.write("end_of_record\n");
+        }
+        writer.flush();
+      }
+    };
+  }
+
+  @Override
+  protected void afterWrite(Executor executor) {
     notifyAboutBaselineCoverage(executor.getEventBus());
   }
 
@@ -114,7 +123,7 @@ public class BaselineCoverageAction extends AbstractFileWriteAction
     Artifact coverageData = ruleContext.getAnalysisEnvironment().getDerivedArtifact(
         Util.getWorkspaceRelativePath(ruleContext.getTarget()).getChild("baseline_coverage.dat"),
         ruleContext.getConfiguration().getTestLogsDirectory());
-    ruleContext.getAnalysisEnvironment().registerAction(new BaselineCoverageAction(
+    ruleContext.registerAction(new BaselineCoverageAction(
         ruleContext.getActionOwner(), instrumentedFiles, coverageData));
 
     return ImmutableList.of(coverageData);

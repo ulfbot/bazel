@@ -49,7 +49,7 @@ public class MiddlemanAction extends AbstractAction {
   }
 
   @Override
-  public void execute(
+  public final void execute(
       ActionExecutionContext actionExecutionContext) {
     throw new IllegalStateException("MiddlemanAction should never be executed");
   }
@@ -98,11 +98,6 @@ public class MiddlemanAction extends AbstractAction {
   @Override
   public String getMnemonic() {
     return MIDDLEMAN_MNEMONIC;
-  }
-
-  @Override
-  public boolean shouldCreateExtraAction() {
-    return false;
   }
 
   /**

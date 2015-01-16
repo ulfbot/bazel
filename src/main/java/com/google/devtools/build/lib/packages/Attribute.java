@@ -35,6 +35,7 @@ import com.google.devtools.build.lib.util.StringUtil;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -266,6 +267,7 @@ public final class Attribute implements Comparable<Attribute> {
     private Set<PropertyFlag> propertyFlags = EnumSet.noneOf(PropertyFlag.class);
     private PredicateWithMessage<Object> allowedValues = null;
     private ImmutableSet<String> mandatoryProviders = ImmutableSet.<String>of();
+    private Set<Class<? extends AspectFactory<?, ?, ?>>> aspects = new LinkedHashSet<>();
 
     /**
      * Creates an attribute builder with given name and type. This attribute is optional, uses
@@ -628,6 +630,14 @@ public final class Attribute implements Comparable<Attribute> {
     }
 
     /**
+     * Asserts that a particular aspect needs to be computed for all direct dependencies through
+     * this attribute.
+     */
+    public Builder<TYPE> aspect(Class<? extends AspectFactory<?, ?, ?>> aspect) {
+      this.aspects.add(aspect);
+      return this;
+    }
+    /**
      * Sets the predicate-like edge validity checker.
      */
     public Builder<TYPE> validityPredicate(ValidityPredicate validityPredicate) {
@@ -649,31 +659,18 @@ public final class Attribute implements Comparable<Attribute> {
      * Makes the built attribute "non-configurable", i.e. its value cannot be influenced by
      * the build configuration. Attributes are "configurable" unless explicitly opted out here.
      *
-     * @deprecated use {@link #nonconfigurable(String)} instead
-     */
-    @Deprecated
-    public Builder<TYPE> nonconfigurable() {
-      return setPropertyFlag(PropertyFlag.NONCONFIGURABLE, "nonconfigurable");
-    }
-
-    /**
-     * Variation of {@link #nonconfigurable} that requires a stated reason *why* this attribute
-     * can't be configurable. The reason isn't used by Blaze - it's solely a mechanism
-     * for enforced developer documentation.
-     *
      * <p>Non-configurability indicates an exceptional state: there exists Blaze logic that needs
      * the attribute's value, has no access to configurations, and can't apply a workaround
      * through an appropriate {@link AbstractAttributeMapper} implementation. Scenarios like
-     * this should be as uncommon as possible (ideally non-existent), so it's important we
-     * maintain clear documentation on what causes them and why users consequently can't
-     * configure certain attributes.
+     * this should be as uncommon as possible, so it's important we maintain clear documentation
+     * on what causes them and why users consequently can't configure certain attributes.
      *
-     * <p>Always use this over {@link #nonconfigurable()}  That version will be removed
-     * outright when all instances are properly updated.
+     * @param reason why this attribute can't be configurable. This isn't used by Blaze - it's
+     *    solely a documentation mechanism.
      */
     public Builder<TYPE> nonconfigurable(String reason) {
       Preconditions.checkState(!reason.isEmpty());
-      return nonconfigurable();
+      return setPropertyFlag(PropertyFlag.NONCONFIGURABLE, "nonconfigurable");
     }
 
     /**
@@ -693,8 +690,6 @@ public final class Attribute implements Comparable<Attribute> {
      */
     public Attribute build(String name) {
       Preconditions.checkState(!name.isEmpty(), "name has not been set");
-      Preconditions.checkState(value instanceof LateBoundDefault || !isLateBound(name),
-          "The name of late bound attributes has to start with ':'");
       // TODO(bazel-team): Remove this check again, and remove all allowedFileTypes() calls.
       if ((type == Type.LABEL) || (type == Type.LABEL_LIST)) {
         if ((name.startsWith("$") || name.startsWith(":")) && !allowedFileTypesForLabelsSet) {
@@ -709,7 +704,7 @@ public final class Attribute implements Comparable<Attribute> {
           valueSet ? value : type.getDefaultValue(), configTransition, configurator,
           allowedRuleClassesForLabels, allowedRuleClassesForLabelsWarning,
           allowedFileTypesForLabels, allowedFileTypesForLabelsSet, validityPredicate, condition,
-          allowedValues, mandatoryProviders);
+          allowedValues, mandatoryProviders, ImmutableSet.copyOf(aspects));
     }
   }
 
@@ -866,17 +861,15 @@ public final class Attribute implements Comparable<Attribute> {
    */
   public static final class SkylarkLateBound implements LateBoundDefault<Object> {
 
-    private final boolean useHostConfig;
     private final SkylarkCallbackFunction callback;
 
-    public SkylarkLateBound(boolean useHostConfig, SkylarkCallbackFunction callback) {
-      this.useHostConfig = useHostConfig;
+    public SkylarkLateBound(SkylarkCallbackFunction callback) {
       this.callback = callback;
     }
 
     @Override
     public boolean useHostConfiguration() {
-      return useHostConfig;
+      return false;
     }
 
     @Override
@@ -957,6 +950,8 @@ public final class Attribute implements Comparable<Attribute> {
 
   private final ImmutableSet<String> mandatoryProviders;
 
+  private final ImmutableSet<Class<? extends AspectFactory<?, ?, ?>>> aspects;
+
   /**
    * Constructs a rule attribute with the specified name, type and default
    * value.
@@ -982,12 +977,25 @@ public final class Attribute implements Comparable<Attribute> {
       ValidityPredicate validityPredicate,
       Predicate<AttributeMap> condition,
       PredicateWithMessage<Object> allowedValues,
-      ImmutableSet<String> mandatoryProviders) {
+      ImmutableSet<String> mandatoryProviders,
+      ImmutableSet<Class<? extends AspectFactory<?, ?, ?>>> aspects) {
+    Preconditions.checkNotNull(configTransition);
     Preconditions.checkArgument(
         (configTransition == ConfigurationTransition.NONE && configurator == null)
         || type == Type.LABEL || type == Type.LABEL_LIST
         || type == Type.NODEP_LABEL || type == Type.NODEP_LABEL_LIST,
         "Configuration transitions can only be specified for label or label list attributes");
+    Preconditions.checkArgument(isLateBound(name) == (defaultValue instanceof LateBoundDefault),
+        "late bound attributes require a default value that is late bound (and vice versa)");
+    if (isLateBound(name)) {
+      LateBoundDefault<?> lateBoundDefault = (LateBoundDefault<?>) defaultValue;
+      Preconditions.checkArgument((configurator == null),
+          "a late bound attribute cannot specify a configurator");
+      Preconditions.checkArgument(!lateBoundDefault.useHostConfiguration()
+          || (configTransition == ConfigurationTransition.HOST),
+          "a late bound default value using the host configuration must use the host transition");
+    }
+
     this.name = name;
     this.type = type;
     this.propertyFlags = propertyFlags;
@@ -1002,6 +1010,7 @@ public final class Attribute implements Comparable<Attribute> {
     this.condition = condition;
     this.allowedValues = allowedValues;
     this.mandatoryProviders = mandatoryProviders;
+    this.aspects = aspects;
   }
 
   /**
@@ -1175,6 +1184,13 @@ public final class Attribute implements Comparable<Attribute> {
   }
 
   /**
+   * Returns the set of aspects required for dependencies through this attribute.
+   */
+  public ImmutableSet<Class<? extends AspectFactory<?, ?, ?>>> getAspects() {
+    return aspects;
+  }
+
+  /**
    * Returns the default value of this attribute in the context of the
    * specified Rule.  For attributes with a computed default, i.e. {@code
    * hasComputedDefault()}, {@code rule} must be non-null since the result may
@@ -1209,12 +1225,8 @@ public final class Attribute implements Comparable<Attribute> {
   }
 
   public LateBoundDefault<?> getLateBoundDefault() {
-    // TODO(bazel-team): Change this into a precondition check when all attributes are converted.
-    if (defaultValue instanceof LateBoundDefault) {
-      return (LateBoundDefault<?>) defaultValue;
-    } else {
-      return null;
-    }
+    Preconditions.checkState(isLateBound());
+    return (LateBoundDefault<?>) defaultValue;
   }
 
   /**

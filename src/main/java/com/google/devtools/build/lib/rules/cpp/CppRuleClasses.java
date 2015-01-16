@@ -28,10 +28,10 @@ import static com.google.devtools.build.lib.rules.cpp.CppFileTypes.PIC_OBJECT_FI
 import static com.google.devtools.build.lib.rules.cpp.CppFileTypes.SHARED_LIBRARY;
 import static com.google.devtools.build.lib.rules.cpp.CppFileTypes.VERSIONED_SHARED_LIBRARY;
 
+import com.google.devtools.build.lib.analysis.LanguageDependentFragment.LibraryLanguage;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction.SafeImplicitOutputsFunction;
 import com.google.devtools.build.lib.rules.test.InstrumentedFilesCollector.InstrumentationSpec;
 import com.google.devtools.build.lib.util.FileTypeSet;
-import com.google.devtools.build.lib.view.LanguageDependentFragment.LibraryLanguage;
 
 /**
  * Rule class definitions for C++ rules.
@@ -80,4 +80,19 @@ public class CppRuleClasses {
    * A string constant for the layering_check feature.
    */
   public static final String LAYERING_CHECK = "layering_check";
+  
+  /**
+   * A string constant for the parse_headers feature.
+   */
+  public static final String PARSE_HEADERS = "parse_headers";
+  
+  /**
+   * A string constant for the preprocess_headers feature.
+   */
+  public static final String PREPROCESS_HEADERS = "preprocess_headers";
+
+  /**
+   * A string constant for the header_modules feature.
+   */
+  public static final String HEADER_MODULES = "header_modules";
 }

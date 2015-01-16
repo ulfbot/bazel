@@ -16,6 +16,8 @@ package com.google.devtools.build.lib.rules.cpp;
 import com.google.devtools.build.lib.actions.ActionContextMarker;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionExecutionException;
+import com.google.devtools.build.lib.actions.ActionInput;
+import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.Executor.ActionContext;
 import com.google.devtools.build.lib.actions.ResourceSet;
@@ -39,6 +41,11 @@ public interface CppCompileActionContext extends ActionContext {
      */
     byte[] getContents() throws IOException;
   }
+
+  /** Does include scanning to find the list of files needed to execute the action. */
+  public Collection<? extends ActionInput> findAdditionalInputs(CppCompileAction action,
+      ActionExecutionContext actionExecutionContext)
+      throws ExecException, InterruptedException, ActionExecutionException;
 
   /**
    * Executes the given action and return the reply of the executor.
@@ -71,7 +78,7 @@ public interface CppCompileActionContext extends ActionContext {
    * Returns the include files that should be shipped to the executor in addition the ones that
    * were declared.
    */
-  Collection<String> getScannedIncludeFiles(
+  Collection<Artifact> getScannedIncludeFiles(
       CppCompileAction action, ActionExecutionContext actionExecutionContext)
           throws ActionExecutionException, InterruptedException;
 }

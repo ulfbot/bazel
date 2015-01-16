@@ -19,6 +19,11 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multimap;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration.LabelConverter;
+import com.google.devtools.build.lib.analysis.config.CompilationMode;
+import com.google.devtools.build.lib.analysis.config.FragmentOptions;
+import com.google.devtools.build.lib.analysis.config.PerLabelOptions;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration.HeadersCheckingMode;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration.LibcTop;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration.StripMode;
@@ -26,11 +31,6 @@ import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.syntax.Label.SyntaxException;
 import com.google.devtools.build.lib.util.OptionsUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
-import com.google.devtools.build.lib.view.config.BuildConfiguration.LabelConverter;
-import com.google.devtools.build.lib.view.config.CompilationMode;
-import com.google.devtools.build.lib.view.config.FragmentOptions;
-import com.google.devtools.build.lib.view.config.PerLabelOptions;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.LipoMode;
 import com.google.devtools.common.options.Converter;
 import com.google.devtools.common.options.Converters;
@@ -82,9 +82,7 @@ public class CppOptions extends FragmentOptions {
     public List<CompilationMode> convert(String input) throws OptionsParsingException {
       ImmutableSet.Builder<CompilationMode> modes = ImmutableSet.builder();
       if (input.equals("yes")) { // Special case: enable all modes.
-        for (CompilationMode c : CompilationMode.values()) {
-          modes.add(c);
-        }
+        modes.add(CompilationMode.values());
       } else if (!input.equals("no")) { // "no" is another special case that disables all modes.
         CompilationMode.Converter modeConverter = new CompilationMode.Converter();
         for (String mode : Splitter.on(',').split(input)) {
@@ -216,9 +214,8 @@ public class CppOptions extends FragmentOptions {
                  + "By default, a suitable version is chosen based on --cpu.")
   public String glibc;
 
-
   @Option(name = "thin_archives",
-          defaultValue = "true",
+          defaultValue = "false",
           category = "strategy",  // but also adds edges to the action graph
           help = "Pass the 'T' flag to ar if supported by the toolchain. " +
                  "All supported toolchains support this setting.")

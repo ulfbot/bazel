@@ -33,6 +33,7 @@ import com.google.devtools.build.lib.syntax.FilesetEntry;
 import com.google.devtools.build.lib.syntax.GlobCriteria;
 import com.google.devtools.build.lib.syntax.GlobList;
 import com.google.devtools.build.lib.syntax.Label;
+import com.google.devtools.build.lib.syntax.Label.SyntaxException;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
@@ -129,17 +130,16 @@ public class PackageDeserializer {
 
       Label ruleLabel = deserializeLabel(rulePb.getName());
       Location ruleLocation = deserializeLocation(rulePb.getParseableLocation());
-
-      Rule rule = ruleClass.createRuleWithParsedAttributeValues(
-          ruleLabel, packageBuilder, ruleLocation, attributeValues,
-          NullEventHandler.INSTANCE);
       try {
+        Rule rule = ruleClass.createRuleWithParsedAttributeValues(
+            ruleLabel, packageBuilder, ruleLocation, attributeValues,
+            NullEventHandler.INSTANCE);
         packageBuilder.addRule(rule);
-      } catch (NameConflictException e) {
+        
+        Preconditions.checkState(!rule.containsErrors());
+      } catch (NameConflictException | SyntaxException e) {
         throw new PackageDeserializationException(e);
       }
-
-      Preconditions.checkState(!rule.containsErrors());
     }
   }
 
@@ -230,7 +230,7 @@ public class PackageDeserializer {
 
   private static Label deserializeLabel(String labelName) throws PackageDeserializationException {
     try {
-      return Label.parseAbsolute(labelName);
+      return Label.parseRepositoryLabel(labelName);
     } catch (Label.SyntaxException e) {
       throw new PackageDeserializationException("Invalid label: " + e.getMessage(), e);
     }
@@ -355,6 +355,12 @@ public class PackageDeserializer {
           subincludeBuildFile.getParentDirectory().getRelative(label.getName()));
     }
 
+    ImmutableList.Builder<Label> skylarkFileDependencies = ImmutableList.builder();
+    for (String skylarkFile : packagePb.getSkylarkLabelList()) {
+      skylarkFileDependencies.add(deserializeLabel(skylarkFile));
+    }
+    builder.setSkylarkFileDependencies(skylarkFileDependencies.build());
+
     MakeEnvironment.Builder makeEnvBuilder = new MakeEnvironment.Builder();
     for (Build.MakeVar makeVar : packagePb.getMakeVariableList()) {
       for (Build.MakeVarBinding binding : makeVar.getBindingList()) {
@@ -395,7 +401,13 @@ public class PackageDeserializer {
    */
   public Package deserialize(Build.Package packagePb)
       throws PackageDeserializationException {
-    Package.Builder builder = new Package.Builder(packagePb.getName());
+    Package.Builder builder;
+    try {
+      builder = new Package.Builder(
+          new PackageIdentifier(packagePb.getRepository(), new PathFragment(packagePb.getName())));
+    } catch (SyntaxException e) {
+      throw new PackageDeserializationException(e);
+    }
     StoredEventHandler eventHandler = new StoredEventHandler();
     deserializeInternal(packagePb, eventHandler, builder);
     builder.addEvents(eventHandler.getEvents());

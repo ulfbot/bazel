@@ -20,7 +20,7 @@ import com.google.common.base.Stopwatch;
 import com.google.common.collect.HashBasedTable;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Multimap;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Ordering;
 import com.google.common.collect.Table;
 import com.google.common.eventbus.EventBus;
@@ -36,7 +36,6 @@ import com.google.devtools.build.lib.actions.ActionInputFileCache;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.BlazeExecutor;
 import com.google.devtools.build.lib.actions.BuildFailedException;
-import com.google.devtools.build.lib.actions.Builder;
 import com.google.devtools.build.lib.actions.Dumper;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.ExecutionStrategy;
@@ -49,7 +48,21 @@ import com.google.devtools.build.lib.actions.ResourceManager;
 import com.google.devtools.build.lib.actions.SpawnActionContext;
 import com.google.devtools.build.lib.actions.TestExecException;
 import com.google.devtools.build.lib.actions.cache.ActionCache;
-import com.google.devtools.build.lib.actions.cache.MetadataCache;
+import com.google.devtools.build.lib.analysis.BuildView;
+import com.google.devtools.build.lib.analysis.BuildView.AnalysisResult;
+import com.google.devtools.build.lib.analysis.CompilationPrerequisitesProvider;
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.FileProvider;
+import com.google.devtools.build.lib.analysis.FilesToCompileProvider;
+import com.google.devtools.build.lib.analysis.InputFileConfiguredTarget;
+import com.google.devtools.build.lib.analysis.OutputFileConfiguredTarget;
+import com.google.devtools.build.lib.analysis.TempsProvider;
+import com.google.devtools.build.lib.analysis.TopLevelArtifactHelper;
+import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.analysis.ViewCreationFailedException;
+import com.google.devtools.build.lib.analysis.WorkspaceStatusAction;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.BuildConfigurationCollection;
 import com.google.devtools.build.lib.blaze.BlazeModule;
 import com.google.devtools.build.lib.blaze.BlazeRuntime;
 import com.google.devtools.build.lib.buildtool.BuildRequest.BuildRequestOptions;
@@ -67,11 +80,13 @@ import com.google.devtools.build.lib.exec.SingleBuildFileCache;
 import com.google.devtools.build.lib.exec.SourceManifestActionContextImpl;
 import com.google.devtools.build.lib.exec.SymlinkTreeStrategy;
 import com.google.devtools.build.lib.packages.Rule;
-import com.google.devtools.build.lib.pkgcache.PackageUpToDateChecker;
 import com.google.devtools.build.lib.profiler.ProfilePhase;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.ProfilerTask;
+import com.google.devtools.build.lib.rules.fileset.FilesetActionContext;
+import com.google.devtools.build.lib.rules.fileset.FilesetActionContextImpl;
 import com.google.devtools.build.lib.rules.test.TestActionContext;
+import com.google.devtools.build.lib.skyframe.Builder;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.util.AbruptExitException;
@@ -83,22 +98,6 @@ import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.BuildView;
-import com.google.devtools.build.lib.view.BuildView.AnalysisResult;
-import com.google.devtools.build.lib.view.CompilationPrerequisitesProvider;
-import com.google.devtools.build.lib.view.ConfiguredTarget;
-import com.google.devtools.build.lib.view.FileProvider;
-import com.google.devtools.build.lib.view.FilesToCompileProvider;
-import com.google.devtools.build.lib.view.InputFileConfiguredTarget;
-import com.google.devtools.build.lib.view.OutputFileConfiguredTarget;
-import com.google.devtools.build.lib.view.TempsProvider;
-import com.google.devtools.build.lib.view.TransitiveInfoCollection;
-import com.google.devtools.build.lib.view.ViewCreationFailedException;
-import com.google.devtools.build.lib.view.WorkspaceStatusAction;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
-import com.google.devtools.build.lib.view.config.BuildConfigurationCollection;
-import com.google.devtools.build.lib.view.fileset.FilesetActionContext;
-import com.google.devtools.build.lib.view.fileset.FilesetActionContextImpl;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -106,7 +105,6 @@ import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -310,27 +308,22 @@ public class ExecutionTool {
    * @param analysisResult the analysis phase output
    * @param buildResult the mutable build result
    * @param skyframeExecutor the skyframe executor (if any)
-   * @param packageRoots package roots collected from loading phase and BuildConfigutaionCollection 
+   * @param packageRoots package roots collected from loading phase and BuildConfigutaionCollection
    * creation
    */
   void executeBuild(AnalysisResult analysisResult,
       BuildResult buildResult, @Nullable SkyframeExecutor skyframeExecutor,
-      BuildConfigurationCollection configurations, ImmutableMap<PathFragment, Path> packageRoots)
+      BuildConfigurationCollection configurations,
+      ImmutableMap<PathFragment, Path> packageRoots)
       throws BuildFailedException, InterruptedException, AbruptExitException, TestExecException,
       ViewCreationFailedException {
     Stopwatch timer = Stopwatch.createStarted();
     prepare(packageRoots, configurations);
 
     ActionGraph actionGraph = analysisResult.getActionGraph();
-    if (!useSkyframeFull(skyframeExecutor)) {
-      // Skyframe execution does not use a global action graph.
-      executor.setActionGraph(actionGraph);
-    }
 
     // Get top-level artifacts.
-    ImmutableSet<Artifact> artifactsToBuild = analysisResult.getArtifactsToBuild();
-    Multimap<ConfiguredTarget, Artifact> targetCompletionMap =
-        analysisResult.getTargetCompletionMap();
+    ImmutableSet<Artifact> additionalArtifacts = analysisResult.getAdditionalArtifactsToBuild();
 
     // Optionally dump information derived from the action graph.
     // Ideally, we would do this after creating the symlinks, so that
@@ -339,7 +332,7 @@ public class ExecutionTool {
     // we really shouldn't be writing anything to disk.  Note that
     // we'll take advantage of the symlinks, if they already exist, in
     // getPrettyPath.
-    maybeDump(request, executor, actionGraph, artifactsToBuild);
+    maybeDump(request, executor, actionGraph, additionalArtifacts);
 
     // If --nobuild is specified, this request completes successfully without
     // execution.  (We only got here because of --dump_action_graph or similar.)
@@ -371,11 +364,7 @@ public class ExecutionTool {
     }
 
     ActionCache actionCache = getActionCache();
-    MetadataCache metadataCache = useSkyframeFull(skyframeExecutor)
-        ? null
-        : runtime.getPersistentMetadataCache();
-    Builder builder = createBuilder(request, executor, actionCache, metadataCache,
-        skyframeExecutor);
+    Builder builder = createBuilder(request, executor, actionCache, skyframeExecutor);
 
     //
     // Execution proper.  All statements below are logically nested in
@@ -392,9 +381,13 @@ public class ExecutionTool {
         installExplanationHandler(request.getBuildOptions().explanationPath,
                                   request.getOptionsDescription());
 
-    Set<Artifact> builtArtifacts = new HashSet<>();
+    Set<ConfiguredTarget> builtTargets = new HashSet<>();
     boolean interrupted = false;
     try {
+      Iterable<Artifact> allArtifactsForProviders = Iterables.concat(additionalArtifacts,
+          TopLevelArtifactHelper.getAllArtifactsToBuild(
+              analysisResult.getTargetsToBuild(), analysisResult.getTopLevelContext()),
+          TopLevelArtifactHelper.getAllArtifactsToTest(analysisResult.getTargetsToTest()));
       if (request.isRunningInEmacs()) {
         // The syntax of this message is tightly constrained by lisp/progmodes/compile.el in emacs
         request.getOutErr().printErrLn("blaze: Entering directory `" + getExecRoot() + "/'");
@@ -403,35 +396,28 @@ public class ExecutionTool {
         actionContextProvider.executionPhaseStarting(
             fileCache,
             actionGraph,
-            artifactsToBuild);
+            allArtifactsForProviders);
       }
       executor.executionPhaseStarting();
-      if (useSkyframeFull(skyframeExecutor)) {
-        skyframeExecutor.drainChangedFiles();
-      }
+      skyframeExecutor.drainChangedFiles();
 
       if (request.getViewOptions().discardAnalysisCache) {
         // Free memory by removing cache entries that aren't going to be needed. Note that in
         // skyframe full, this destroys the action graph as well, so we can only do it after the
         // action graph is no longer needed.
         getView().clearAnalysisCache(analysisResult.getTargetsToBuild());
-        if (useSkyframeFull(skyframeExecutor)) {
-          actionGraph = null;
-        }
+        actionGraph = null;
       }
 
       configureResourceManager(request);
 
       Profiler.instance().markPhase(ProfilePhase.EXECUTE);
 
-      // This probably does not work with Skyframe, because then the modified file set
-      // returned by the runtime is not right (since it is updated in PackageCache). This also
-      // fails to work when the order of commands is build-query-build (because changes during
-      // between the first build command and the query command get lost).
-      builder.buildArtifacts(artifactsToBuild,
-          analysisResult.getExclusiveTestArtifacts(),
-          null,
-          executor, runtime.getModifiedFileSetForSourceFiles(), builtArtifacts,
+      builder.buildArtifacts(additionalArtifacts,
+          analysisResult.getParallelTests(),
+          analysisResult.getExclusiveTests(),
+          analysisResult.getTargetsToBuild(),
+          executor, builtTargets,
           request.getBuildOptions().explanationPath != null);
 
     } catch (InterruptedException e) {
@@ -446,12 +432,7 @@ public class ExecutionTool {
       }
 
       // Transfer over source file "last save time" stats so the remote logger can find them.
-      runtime.getEventBus().post(
-          new ExecutionFinishedEvent(
-              metadataCache == null
-                  ? ImmutableMap.<String, Long> of()
-                  : metadataCache.getChangedFileSaveTimes(),
-              metadataCache == null ? 0 : metadataCache.getLastFileSaveTime()));
+      runtime.getEventBus().post(new ExecutionFinishedEvent(ImmutableMap.<String, Long> of(), 0));
 
       // Disable system load polling (noop if it was not enabled).
       ResourceManager.instance().setAutoSensing(false);
@@ -463,12 +444,11 @@ public class ExecutionTool {
       Profiler.instance().markPhase(ProfilePhase.FINISH);
 
       if (!interrupted) {
-        saveCaches(actionCache, metadataCache);
+        saveCaches(actionCache);
       }
 
       long startTime = Profiler.nanoTimeMaybe();
-      determineSuccessfulTargets(request, buildResult, configuredTargets, builtArtifacts,
-          targetCompletionMap, timer);
+      determineSuccessfulTargets(buildResult, configuredTargets, builtTargets, timer);
       showBuildResult(request, buildResult, configuredTargets);
       Preconditions.checkNotNull(buildResult.getSuccessfulTargets());
       Profiler.instance().logSimpleTask(startTime, ProfilerTask.INFO, "Show results");
@@ -670,24 +650,23 @@ public class ExecutionTool {
    * Computes the result of the build. Sets the list of successful (up-to-date)
    * targets in the request object.
    *
-   * @param request The build request, which specifies various options.
-   *                This function sets the successfulTargets field of the request object.
    * @param configuredTargets The configured targets whose artifacts are to be
    *                          built.
-   * @param builtArtifacts Set of successfully built artifacts.
    * @param timer A timer that was started when the execution phase started.
    */
-  private void determineSuccessfulTargets(BuildRequest request, BuildResult result,
-      Collection<ConfiguredTarget> configuredTargets, Set<Artifact> builtArtifacts,
-      Multimap<ConfiguredTarget, Artifact> artifactsMap, Stopwatch timer) {
+  private void determineSuccessfulTargets(BuildResult result,
+      Collection<ConfiguredTarget> configuredTargets, Set<ConfiguredTarget> builtTargets,
+      Stopwatch timer) {
+    // Maintain the ordering by copying builtTargets into a LinkedHashSet in the same iteration
+    // order as configuredTargets.
     Collection<ConfiguredTarget> successfulTargets = new LinkedHashSet<>();
     for (ConfiguredTarget target : configuredTargets) {
-      if (builtArtifacts.containsAll(artifactsMap.get(target))) {
+      if (builtTargets.contains(target)) {
         successfulTargets.add(target);
       }
     }
-    getEventBus().post(new ExecutionPhaseCompleteEvent(
-        successfulTargets, timer.stop().elapsed(TimeUnit.MILLISECONDS)));
+    getEventBus().post(
+        new ExecutionPhaseCompleteEvent(timer.stop().elapsed(TimeUnit.MILLISECONDS)));
     result.setSuccessfulTargets(successfulTargets);
   }
 
@@ -843,24 +822,15 @@ public class ExecutionTool {
     }
   }
 
-  private static boolean useSkyframeFull(SkyframeExecutor skyframeExecutor) {
-    return true;
-  }
-
   private Builder createBuilder(BuildRequest request,
       Executor executor,
-      ActionCache actionCache, @Nullable MetadataCache metadataCache,
-      @Nullable SkyframeExecutor skyframeExecutor) {
+      ActionCache actionCache,
+      SkyframeExecutor skyframeExecutor) {
     BuildRequest.BuildRequestOptions options = request.getBuildOptions();
     boolean verboseExplanations = options.verboseExplanations;
     boolean keepGoing = request.getViewOptions().keepGoing;
 
-    if (metadataCache != null) {
-      metadataCache.setInvocationStartTime(new Date().getTime());
-    }
-
     Path actionOutputRoot = runtime.getDirectories().getActionConsoleOutputDirectory();
-    PackageUpToDateChecker packageUpToDateChecker = runtime.getPackageUpToDateChecker();
     Predicate<Action> executionFilter = CheckUpToDateFilter.fromOptions(
         request.getOptions(ExecutionOptions.class));
 
@@ -872,11 +842,10 @@ public class ExecutionTool {
     // client.
     fileCache = createBuildSingleFileCache(executor.getExecRoot());
     skyframeExecutor.setActionOutputRoot(actionOutputRoot);
-    boolean explain = request.getBuildOptions().explanationPath != null;
     return new SkyframeBuilder(skyframeExecutor,
-        new ActionCacheChecker(actionCache, getView().getArtifactFactory(),
-            packageUpToDateChecker, executionFilter, verboseExplanations),
-        keepGoing, explain, actualJobs, options.checkOutputFiles, fileCache,
+        new ActionCacheChecker(actionCache, getView().getArtifactFactory(), executionFilter,
+            verboseExplanations),
+        keepGoing, actualJobs, options.checkOutputFiles, fileCache,
         request.getBuildOptions().progressReportInterval);
   }
 
@@ -901,11 +870,9 @@ public class ExecutionTool {
    * Writes the cache files to disk, reporting any errors that occurred during
    * writing.
    */
-  private void saveCaches(ActionCache actionCache, @Nullable MetadataCache metadataCache) {
+  private void saveCaches(ActionCache actionCache) {
     long actionCacheSizeInBytes = 0;
-    long metadataCacheSizeInBytes = 0;
     long actionCacheSaveTime;
-    long metadataCacheSaveTime = 0;
 
     long startTime = BlazeClock.nanoTime();
     try {
@@ -922,26 +889,7 @@ public class ExecutionTool {
                                         ProfilerTask.INFO, "Saving action cache");
     }
 
-    if (metadataCache != null) {
-      startTime = BlazeClock.nanoTime();
-      try {
-        LOG.info("saving metadata cache...");
-        metadataCacheSizeInBytes = metadataCache.save();
-        LOG.info("metadata cache saved");
-      } catch (IOException e) {
-        getReporter().handle(
-            Event.error("I/O error while writing metadata cache: " + e.getMessage()));
-      } finally {
-        long stopTime = BlazeClock.nanoTime();
-        metadataCacheSaveTime =
-            TimeUnit.MILLISECONDS.convert(stopTime - startTime, TimeUnit.NANOSECONDS);
-        Profiler.instance().logSimpleTask(startTime, stopTime,
-            ProfilerTask.INFO, "Saving metadata cache");
-      }
-    }
-
     runtime.getEventBus().post(new CachesSavedEvent(
-        metadataCacheSaveTime, metadataCacheSizeInBytes,
         actionCacheSaveTime, actionCacheSizeInBytes));
   }
 
@@ -962,11 +910,6 @@ public class ExecutionTool {
       cache = new SingleBuildFileCache(cwd, fs);
     }
     return cache;
-  }
-
-  private boolean enableIncrementalGraphPruning() {
-    String envVar = runtime.getClientEnv().get("BLAZE_INTERNAL_USE_INCREMENTAL_GRAPH_PRUNING");
-    return envVar == null || !envVar.equals("0");
   }
 
   private Reporter getReporter() {

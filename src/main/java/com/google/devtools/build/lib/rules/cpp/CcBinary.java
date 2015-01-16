@@ -22,6 +22,18 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ParameterFile;
+import com.google.devtools.build.lib.analysis.AnalysisEnvironment;
+import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
+import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.Runfiles;
+import com.google.devtools.build.lib.analysis.RunfilesProvider;
+import com.google.devtools.build.lib.analysis.RunfilesSupport;
+import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.analysis.Util;
+import com.google.devtools.build.lib.analysis.actions.FileWriteAction;
+import com.google.devtools.build.lib.analysis.actions.SpawnAction;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
@@ -40,18 +52,6 @@ import com.google.devtools.build.lib.util.OsUtils;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.AnalysisEnvironment;
-import com.google.devtools.build.lib.view.ConfiguredTarget;
-import com.google.devtools.build.lib.view.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.view.RuleConfiguredTargetBuilder;
-import com.google.devtools.build.lib.view.RuleContext;
-import com.google.devtools.build.lib.view.Runfiles;
-import com.google.devtools.build.lib.view.RunfilesProvider;
-import com.google.devtools.build.lib.view.RunfilesSupport;
-import com.google.devtools.build.lib.view.TransitiveInfoCollection;
-import com.google.devtools.build.lib.view.Util;
-import com.google.devtools.build.lib.view.actions.FileWriteAction;
-import com.google.devtools.build.lib.view.actions.SpawnAction;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -166,7 +166,7 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
         .addCompilationPrerequisites(common.getStaticLibrariesFromSrcs())
         .addSources(common.getCAndCppSources())
         .addPrivateHeaders(FileType.filter(
-            ruleContext.getPrerequisiteArtifacts("srcs", Mode.TARGET),
+            ruleContext.getPrerequisiteArtifacts("srcs", Mode.TARGET).list(),
             CppFileTypes.CPP_HEADER))
         .addObjectFiles(common.getObjectFilesFromSrcs(false))
         .addPicObjectFiles(common.getObjectFilesFromSrcs(true))
@@ -174,7 +174,7 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
         .addDeps(ruleContext.getPrerequisites("deps", Mode.TARGET))
         .addDeps(ImmutableList.of(CppHelper.mallocForTarget(ruleContext)))
         .addPlugins(common.getPlugins())
-        .setEnableLayeringCheck(ruleContext.getFeatures().contains("layering_check"))
+        .setEnableLayeringCheck(ruleContext.getFeatures().contains(CppRuleClasses.LAYERING_CHECK))
         .addSystemIncludeDirs(common.getSystemIncludeDirs())
         .addIncludeDirs(common.getIncludeDirs())
         .addLooseIncludeDirs(common.getLooseIncludeDirs())
@@ -222,7 +222,7 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
     CppLinkAction.Context linkContext = new CppLinkAction.Context(linkActionBuilder);
 
     CppLinkAction linkAction = linkActionBuilder.build();
-    ruleContext.getAnalysisEnvironment().registerAction(linkAction);
+    ruleContext.registerAction(linkAction);
     LibraryToLink outputLibrary = linkAction.getOutputLibrary();
     Iterable<Artifact> fakeLinkerInputs =
         fake ? linkAction.getInputs() : ImmutableList.<Artifact>of();
@@ -284,12 +284,13 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
         ruleBuilder, filesToBuild, ccCompilationOutputs, cppCompilationContext, linkingOutputs,
         dwoArtifacts, transitiveLipoInfo);
 
-    Map<PathFragment, IncludeScannable> scannableMap = new LinkedHashMap<>();
+    Map<Artifact, IncludeScannable> scannableMap = new LinkedHashMap<>();
     if (cppConfiguration.isLipoContextCollector()) {
       for (IncludeScannable scannable : transitiveLipoInfo.getTransitiveIncludeScannables()) {
         // These should all be CppCompileActions, which should have only one source file.
         // This is also checked when they are put into the nested set.
-        PathFragment source = Iterables.getOnlyElement(scannable.getIncludeScannerSources());
+        Artifact source =
+            Iterables.getOnlyElement(scannable.getIncludeScannerSources());
         scannableMap.put(source, scannable);
       }
     }
@@ -313,7 +314,7 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
    */
   private static void createStripAction(RuleContext context,
       CppConfiguration cppConfiguration, Artifact input, Artifact output) {
-    new SpawnAction.Builder(context)
+    context.registerAction(new SpawnAction.Builder()
         .addInput(input)
         .addTransitiveInputs(CppHelper.getToolchain(context).getStrip())
         .addOutput(output)
@@ -332,7 +333,7 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
         .addArgument(input.getExecPathString())
         .setProgressMessage("Stripping " + output.prettyPrint() + " for " + context.getLabel())
         .setMnemonic("CcStrip")
-        .build();
+        .build(context));
   }
 
   /**
@@ -496,7 +497,7 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
     // to support .dwp generation even when fission is disabled. Since no actual functionality
     // is expected then, an empty file is appropriate.
     if (Iterables.isEmpty(allInputs)) {
-      context.getAnalysisEnvironment().registerAction(
+      context.registerAction(
           new FileWriteAction(context.getActionOwner(), dwpOutput, "", false));
       return;
     }
@@ -521,13 +522,13 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
 
     // Step 1: generate our batches. We currently break into arbitrary batches of fixed maximum
     // input counts, but we can always apply more intelligent heuristics if the need arises.
-    SpawnAction.Builder currentPackager = newDwpAction(context, cppConfiguration, dwpTools);
+    SpawnAction.Builder currentPackager = newDwpAction(cppConfiguration, dwpTools);
     int inputsForCurrentPackager = 0;
 
     for (Artifact dwoInput : allInputs) {
       if (inputsForCurrentPackager == MAX_INPUTS_PER_DWP_ACTION) {
         packagers.add(currentPackager);
-        currentPackager = newDwpAction(context, cppConfiguration, dwpTools);
+        currentPackager = newDwpAction(cppConfiguration, dwpTools);
         inputsForCurrentPackager = 0;
       }
       currentPackager.addInputArgument(dwoInput);
@@ -538,11 +539,11 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
     // Step 2: given the batches, create the actions.
     if (packagers.size() == 1) {
       // If we only have one batch, make a single "original inputs --> final output" action.
-      Iterables.getOnlyElement(packagers)
+      context.registerAction(Iterables.getOnlyElement(packagers)
           .addArgument("-o")
           .addOutputArgument(dwpOutput)
           .setMnemonic("CcGenerateDwp")
-          .build();
+          .build(context));
     } else {
       // If we have multiple batches, make them all intermediate actions, then pipe their outputs
       // into an additional action that outputs the final artifact.
@@ -556,21 +557,21 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
       for (SpawnAction.Builder packager : packagers) {
         Artifact intermediateOutput =
             getIntermediateDwpFile(context.getAnalysisEnvironment(), dwpOutput, count++);
-        packager
+        context.registerAction(packager
             .addArgument("-o")
             .addOutputArgument(intermediateOutput)
             .setMnemonic("CcGenerateIntermediateDwp")
-            .build(); // This creates the action and registers it with the analysis environment.
+            .build(context));
         intermediateOutputs.add(intermediateOutput);
       }
 
       // Now create the final action.
-      newDwpAction(context, cppConfiguration, dwpTools)
+      context.registerAction(newDwpAction(cppConfiguration, dwpTools)
           .addInputArguments(intermediateOutputs)
           .addArgument("-o")
           .addOutputArgument(dwpOutput)
           .setMnemonic("CcGenerateDwp")
-          .build(); // This creates the action and registers it with the analysis environment.
+          .build(context));
     }
   }
 
@@ -578,9 +579,9 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
    * Returns a new SpawnAction builder for generating dwp files, pre-initialized with
    * standard settings.
    */
-  private static SpawnAction.Builder newDwpAction(RuleContext context,
-      CppConfiguration cppConfiguration, NestedSet<Artifact> dwpTools) {
-    return new SpawnAction.Builder(context)
+  private static SpawnAction.Builder newDwpAction(CppConfiguration cppConfiguration,
+      NestedSet<Artifact> dwpTools) {
+    return new SpawnAction.Builder()
         .addTransitiveInputs(dwpTools)
         .setExecutable(cppConfiguration.getDwpExecutable())
         .useParameterFile(ParameterFile.ParameterFileType.UNQUOTED);
@@ -593,7 +594,7 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
       int orderNumber) {
     PathFragment outputPath = dwpOutput.getRootRelativePath();
     PathFragment intermediatePath =
-        FileSystemUtils.appendWithoutExtension(outputPath, "-" + String.valueOf(orderNumber));
+        FileSystemUtils.appendWithoutExtension(outputPath, "-" + orderNumber);
     return env.getDerivedArtifact(
         outputPath.getParentDirectory().getRelative(
             INTERMEDIATE_DWP_DIR + "/" + intermediatePath.getPathString()),

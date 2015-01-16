@@ -15,12 +15,9 @@
 package com.google.devtools.build.lib.rules.objc;
 
 import static com.google.devtools.build.lib.rules.objc.IosSdkCommands.BIN_DIR;
-import static com.google.devtools.build.lib.rules.objc.IosSdkCommands.MINIMUM_OS_VERSION;
-import static com.google.devtools.build.lib.rules.objc.IosSdkCommands.TARGET_DEVICE_FAMILIES;
-import static com.google.devtools.build.lib.rules.objc.ObjcActionsBuilder.CLANG;
-import static com.google.devtools.build.lib.rules.objc.ObjcActionsBuilder.CLANG_PLUSPLUS;
-import static com.google.devtools.build.lib.rules.objc.ObjcActionsBuilder.DSYMUTIL;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.ASSET_CATALOG;
+import static com.google.devtools.build.lib.rules.objc.ObjcProvider.DEFINE;
+import static com.google.devtools.build.lib.rules.objc.ObjcProvider.FORCE_LOAD_LIBRARY;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.FRAMEWORK_DIR;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.FRAMEWORK_FILE;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.Flag.USES_CPP;
@@ -30,27 +27,32 @@ import static com.google.devtools.build.lib.rules.objc.ObjcProvider.INCLUDE;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.LIBRARY;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.SDK_DYLIB;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.SDK_FRAMEWORK;
+import static com.google.devtools.build.lib.rules.objc.ObjcProvider.SDK_INCLUDE;
+import static com.google.devtools.build.lib.rules.objc.ObjcProvider.WEAK_SDK_FRAMEWORK;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.XCASSETS_DIR;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Joiner;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.io.ByteSource;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.ActionRegistry;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
+import com.google.devtools.build.lib.analysis.actions.ActionConstructionContext;
+import com.google.devtools.build.lib.analysis.actions.BinaryFileWriteAction;
+import com.google.devtools.build.lib.analysis.actions.CommandLine;
+import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
+import com.google.devtools.build.lib.analysis.actions.FileWriteAction;
+import com.google.devtools.build.lib.analysis.actions.SpawnAction;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.util.LazyString;
+import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.view.actions.ActionConstructionContext;
-import com.google.devtools.build.lib.view.actions.BinaryFileWriteAction;
-import com.google.devtools.build.lib.view.actions.CommandLine;
-import com.google.devtools.build.lib.view.actions.FileWriteAction;
-import com.google.devtools.build.lib.view.actions.SpawnAction;
-import com.google.devtools.build.lib.view.config.BuildConfiguration;
 import com.google.devtools.build.xcode.common.TargetDeviceFamily;
 import com.google.devtools.build.xcode.util.Interspersing;
 import com.google.devtools.build.xcode.xcodegen.proto.XcodeGenProtos;
@@ -80,8 +82,8 @@ final class ObjcActionsBuilder {
     this.actionRegistry = Preconditions.checkNotNull(actionRegistry);
   }
 
-  private static SpawnAction.Builder spawnOnDarwinActionBuilder(ActionConstructionContext context) {
-    return new SpawnAction.Builder(context)
+  private static SpawnAction.Builder spawnOnDarwinActionBuilder() {
+    return new SpawnAction.Builder()
         .setExecutionInfo(ImmutableMap.of(ExecutionRequirements.REQUIRES_DARWIN, ""));
   }
 
@@ -94,15 +96,14 @@ final class ObjcActionsBuilder {
 
   // TODO(bazel-team): Reference a rule target rather than a jar file when Darwin runfiles work
   // better.
-  private static SpawnAction.Builder spawnJavaOnDarwinActionBuilder(
-      ActionConstructionContext context, Artifact deployJarArtifact) {
-    return spawnOnDarwinActionBuilder(context)
+  private static SpawnAction.Builder spawnJavaOnDarwinActionBuilder(Artifact deployJarArtifact) {
+    return spawnOnDarwinActionBuilder()
         .setExecutable(JAVA)
         .addExecutableArguments("-jar", deployJarArtifact.getExecPathString())
         .addInput(deployJarArtifact);
   }
 
-  private static Action compileAction(
+  private static Action[] compileAction(
       ActionConstructionContext context,
       final Artifact sourceFile,
       final Artifact objFile,
@@ -112,8 +113,8 @@ final class ObjcActionsBuilder {
       final OptionsProvider optionsProvider,
       final ObjcConfiguration objcConfiguration,
       final BuildConfiguration buildConfiguration) {
-    return spawnOnDarwinActionBuilder(context)
-        .setMnemonic("Compile")
+    return spawnOnDarwinActionBuilder()
+        .setMnemonic("ObjcCompile")
         .setExecutable(CLANG)
         .setCommandLine(new CommandLine() {
           @Override
@@ -129,7 +130,14 @@ final class ObjcActionsBuilder {
                 .addAll(Interspersing.beforeEach("-include", Artifact.asExecPaths(pchFile.asSet())))
                 .addAll(Interspersing.beforeEach(
                     "-I", PathFragment.safePathStrings(objcProvider.get(INCLUDE))))
+                .addAll(Interspersing.beforeEach(
+                    "-I",
+                    Interspersing.prependEach(
+                        IosSdkCommands.sdkDir(objcConfiguration) + "/usr/include/",
+                        PathFragment.safePathStrings(objcProvider.get(SDK_INCLUDE)))))
                 .addAll(otherFlags)
+                .addAll(Interspersing.prependEach("-D", objcProvider.get(DEFINE)))
+                .addAll(objcConfiguration.getCopts())
                 .addAll(optionsProvider.getCopts())
                 .add("-c").add(sourceFile.getExecPathString())
                 .add("-o").add(objFile.getExecPathString())
@@ -141,7 +149,7 @@ final class ObjcActionsBuilder {
         .addTransitiveInputs(objcProvider.get(HEADER))
         .addTransitiveInputs(objcProvider.get(FRAMEWORK_FILE))
         .addInputs(pchFile.asSet())
-        .build();
+        .build(context);
   }
 
   private static final ImmutableList<String> ARC_ARGS = ImmutableList.of("-fobjc-arc");
@@ -150,7 +158,6 @@ final class ObjcActionsBuilder {
   /**
    * Creates actions to compile each source file individually, and link all the compiled object
    * files into a single archive library.
-   * @return the {@code Action}s that were created
    */
   void registerCompileAndArchiveActions(CompilationArtifacts compilationArtifacts,
       ObjcProvider objcProvider, OptionsProvider optionsProvider) {
@@ -158,18 +165,16 @@ final class ObjcActionsBuilder {
     for (Artifact sourceFile : compilationArtifacts.getSrcs()) {
       Artifact objFile = intermediateArtifacts.objFile(sourceFile);
       objFiles.add(objFile);
-      register(
-          compileAction(context, sourceFile, objFile,
-              compilationArtifacts.getPchFile(), objcProvider, ARC_ARGS, optionsProvider,
-              objcConfiguration, buildConfiguration));
+      register(compileAction(context, sourceFile, objFile,
+          compilationArtifacts.getPchFile(), objcProvider, ARC_ARGS, optionsProvider,
+          objcConfiguration, buildConfiguration));
     }
     for (Artifact nonArcSourceFile : compilationArtifacts.getNonArcSrcs()) {
       Artifact objFile = intermediateArtifacts.objFile(nonArcSourceFile);
       objFiles.add(objFile);
-      register(
-          compileAction(context, nonArcSourceFile, objFile,
-              compilationArtifacts.getPchFile(), objcProvider, NON_ARC_ARGS, optionsProvider,
-              objcConfiguration, buildConfiguration));
+      register(compileAction(context, nonArcSourceFile, objFile,
+          compilationArtifacts.getPchFile(), objcProvider, NON_ARC_ARGS, optionsProvider,
+          objcConfiguration, buildConfiguration));
     }
     for (Artifact archive : compilationArtifacts.getArchive().asSet()) {
       registerAll(archiveActions(context, objFiles.build(), archive, objcConfiguration,
@@ -183,20 +188,14 @@ final class ObjcActionsBuilder {
       final Artifact archive,
       final ObjcConfiguration objcConfiguration,
       final Artifact objList) {
-    LazyString objListContent = new LazyString() {
-      @Override
-      public String toString() {
-        return Artifact.joinExecPaths("\n", objFiles);
-      }
-    };
 
     ImmutableList.Builder<Action> actions = new ImmutableList.Builder<>();
 
     actions.add(new FileWriteAction(
-        context.getActionOwner(), objList, objListContent, /*makeExecutable=*/ false));
+        context.getActionOwner(), objList, joinExecPaths(objFiles), /*makeExecutable=*/ false));
 
-    actions.add(spawnOnDarwinActionBuilder(context)
-        .setMnemonic("Link")
+    actions.add(spawnOnDarwinActionBuilder()
+        .setMnemonic("ObjcLink")
         .setExecutable(LIBTOOL)
         .setCommandLine(new CommandLine() {
             @Override
@@ -213,12 +212,12 @@ final class ObjcActionsBuilder {
         .addInputs(objFiles)
         .addInput(objList)
         .addOutput(archive)
-        .build());
+        .build(context));
 
     return actions.build();
   }
 
-  private void register(Action action) {
+  private void register(Action... action) {
     actionRegistry.registerAction(action);
   }
 
@@ -229,13 +228,13 @@ final class ObjcActionsBuilder {
   }
 
   private static ByteSource xcodegenControlFileBytes(
-      final Artifact pbxproj, final XcodeProvider xcodeProvider) {
+      final Artifact pbxproj, final Iterable<XcodeProvider> xcodeProviders) {
     return new ByteSource() {
       @Override
       public InputStream openStream() {
         return XcodeGenProtos.Control.newBuilder()
             .setPbxproj(pbxproj.getExecPathString())
-            .addAllTarget(xcodeProvider.targets())
+            .addAllTarget(XcodeProvider.targets(xcodeProviders))
             .build()
             .toByteString()
             .newInput();
@@ -247,33 +246,35 @@ final class ObjcActionsBuilder {
    * Generates actions needed to create an Xcode project file.
    */
   void registerXcodegenActions(
-      ObjcBase.Tools baseTools, Artifact pbxproj, XcodeProvider xcodeProvider) {
+      ObjcRuleClasses.Tools baseTools, Artifact pbxproj, Iterable<XcodeProvider> xcodeProviders) {
     Artifact controlFile = intermediateArtifacts.pbxprojControlArtifact();
     register(new BinaryFileWriteAction(
         context.getActionOwner(),
         controlFile,
-        xcodegenControlFileBytes(pbxproj, xcodeProvider),
+        xcodegenControlFileBytes(pbxproj, xcodeProviders),
         /*makeExecutable=*/false));
-    register(new SpawnAction.Builder(context)
-        .setMnemonic("Generate project")
+    register(new SpawnAction.Builder()
+        .setMnemonic("GenerateXcodeproj")
         .setExecutable(baseTools.xcodegen())
         .addArgument("--control")
         .addInputArgument(controlFile)
         .addOutput(pbxproj)
-        .build());
+        .build(context));
   }
 
   /**
    * Creates actions to convert all files specified by the strings attribute into binary format.
    */
   private static Iterable<Action> convertStringsActions(
-      ActionConstructionContext context, ObjcBase.Tools baseTools, StringsFiles stringsFiles) {
+      ActionConstructionContext context,
+      ObjcRuleClasses.Tools baseTools,
+      StringsFiles stringsFiles) {
     ImmutableList.Builder<Action> result = new ImmutableList.Builder<>();
     for (CompiledResourceFile stringsFile : stringsFiles) {
       final Artifact original = stringsFile.getOriginal();
       final Artifact bundled = stringsFile.getBundled().getBundled();
-      result.add(new SpawnAction.Builder(context)
-          .setMnemonic("Convert plist to binary")
+      result.add(new SpawnAction.Builder()
+          .setMnemonic("ConvertStringsPlist")
           .setExecutable(baseTools.plmerge())
           .setCommandLine(new CommandLine() {
             @Override
@@ -284,37 +285,50 @@ final class ObjcActionsBuilder {
           })
           .addInput(original)
           .addOutput(bundled)
-          .build());
+          .build(context));
     }
     return result.build();
+  }
+
+  private Action[] ibtoolzipAction(ObjcRuleClasses.Tools baseTools, String mnemonic, Artifact input,
+      Artifact zipOutput, String archiveRoot) {
+    return spawnJavaOnDarwinActionBuilder(baseTools.actooloribtoolzipDeployJar())
+        .setMnemonic(mnemonic)
+        .setCommandLine(new CustomCommandLine.Builder()
+            // The next three arguments are positional, i.e. they don't have flags before them.
+            .addPath(zipOutput.getExecPath())
+            .add(archiveRoot)
+            .addPath(IBTOOL)
+
+            .add("--minimum-deployment-target").add(objcConfiguration.getMinimumOs())
+            .addPath(input.getExecPath())
+            .build())
+        .addOutput(zipOutput)
+        .addInput(input)
+        .build(context);
   }
 
   /**
    * Creates actions to convert all files specified by the xibs attribute into nib format.
    */
-  private static Iterable<Action> convertXibsActions(
-      ActionConstructionContext context, XibFiles xibFiles) {
+  private Iterable<Action> convertXibsActions(ObjcRuleClasses.Tools baseTools, XibFiles xibFiles) {
     ImmutableList.Builder<Action> result = new ImmutableList.Builder<>();
-    for (CompiledResourceFile xibFile : xibFiles) {
-      final Artifact bundled = xibFile.getBundled().getBundled();
-      final Artifact original = xibFile.getOriginal();
-      result.add(spawnOnDarwinActionBuilder(context)
-          .setMnemonic("Compile xib")
-          .setExecutable(IBTOOL)
-          .setCommandLine(new CommandLine() {
-            @Override
-            public Iterable<String> arguments() {
-              return ImmutableList.of(
-                  "--minimum-deployment-target", MINIMUM_OS_VERSION,
-                  "--compile", bundled.getExecPathString(),
-                  original.getExecPathString());
-            }
-          })
-          .addOutput(bundled)
-          .addInput(original)
-          .build());
+    for (Artifact original : xibFiles) {
+      Artifact zipOutput = intermediateArtifacts.compiledXibFileZip(original);
+      String archiveRoot = BundleableFile.bundlePath(
+          FileSystemUtils.replaceExtension(original.getExecPath(), ".nib"));
+      result.add(ibtoolzipAction(baseTools, "XibCompile", original, zipOutput, archiveRoot));
     }
     return result.build();
+  }
+
+  /**
+   * Outputs of an {@code actool} action besides the zip file.
+   */
+  static final class ExtraActoolOutputs extends IterableWrapper<Artifact> {
+    ExtraActoolOutputs(Artifact... extraActoolOutputs) {
+      super(extraActoolOutputs);
+    }
   }
 
   static final class ExtraActoolArgs extends IterableWrapper<String> {
@@ -328,44 +342,49 @@ final class ObjcActionsBuilder {
   }
 
   void registerActoolzipAction(
-      ObjcBase.Tools tools,
+      ObjcRuleClasses.Tools tools,
       ObjcProvider provider,
-      Artifact actoolzipOutput,
-      ExtraActoolArgs extraActoolArgs) {
+      Artifact zipOutput,
+      ExtraActoolOutputs extraActoolOutputs,
+      ExtraActoolArgs extraActoolArgs,
+      ImmutableSet<TargetDeviceFamily> families) {
     // TODO(bazel-team): Do not use the deploy jar explicitly here. There is currently a bug where
     // we cannot .setExecutable({java_binary target}) and set REQUIRES_DARWIN in the execution info.
     // Note that below we set the archive root to the empty string. This means that the generated
     // zip file will be rooted at the bundle root, and we have to prepend the bundle root to each
     // entry when merging it with the final .ipa file.
-    register(spawnJavaOnDarwinActionBuilder(context, tools.actooloribtoolzipDeployJar())
-        .setMnemonic("Compile asset catalogs")
+    register(spawnJavaOnDarwinActionBuilder(tools.actooloribtoolzipDeployJar())
+        .setMnemonic("AssetCatalogCompile")
         .addTransitiveInputs(provider.get(ASSET_CATALOG))
-        .addOutput(actoolzipOutput)
+        .addOutput(zipOutput)
+        .addOutputs(extraActoolOutputs)
         .setCommandLine(actoolzipCommandLine(
             objcConfiguration,
             provider,
-            actoolzipOutput,
-            extraActoolArgs))
-        .build());
+            zipOutput,
+            extraActoolArgs,
+            families))
+        .build(context));
   }
 
   private static CommandLine actoolzipCommandLine(
       final ObjcConfiguration objcConfiguration,
       final ObjcProvider provider,
-      final Artifact output,
-      final ExtraActoolArgs extraActoolArgs) {
+      final Artifact zipOutput,
+      final ExtraActoolArgs extraActoolArgs,
+      final ImmutableSet<TargetDeviceFamily> families) {
     return new CommandLine() {
       @Override
       public Iterable<String> arguments() {
         ImmutableList.Builder<String> args = new ImmutableList.Builder<String>()
             // The next three arguments are positional, i.e. they don't have flags before them.
-            .add(output.getExecPathString())
+            .add(zipOutput.getExecPathString())
             .add("") // archive root
             .add(IosSdkCommands.ACTOOL_PATH)
             .add("--platform")
             .add(objcConfiguration.getPlatform().getLowerCaseNameInPlist())
-            .add("--minimum-deployment-target").add(MINIMUM_OS_VERSION);
-        for (TargetDeviceFamily targetDeviceFamily : TARGET_DEVICE_FAMILIES) {
+            .add("--minimum-deployment-target").add(objcConfiguration.getMinimumOs());
+        for (TargetDeviceFamily targetDeviceFamily : families) {
           args.add("--target-device").add(targetDeviceFamily.name().toLowerCase(Locale.US));
         }
         return args
@@ -376,33 +395,30 @@ final class ObjcActionsBuilder {
     };
   }
 
-  void registerIbtoolzipAction(ObjcBase.Tools tools, Artifact input, Artifact outputZip) {
-    register(spawnJavaOnDarwinActionBuilder(context, tools.actooloribtoolzipDeployJar())
-        .setMnemonic("Compile storyboard")
-        .addInput(input)
-        .addOutput(outputZip)
-        .setCommandLine(Storyboards.ibtoolzipCommandLine(input, outputZip))
-        .build());
+  void registerIbtoolzipAction(ObjcRuleClasses.Tools tools, Artifact input, Artifact outputZip) {
+    String archiveRoot = BundleableFile.bundlePath(input.getExecPath()) + "c";
+    register(ibtoolzipAction(tools, "StoryboardCompile", input, outputZip, archiveRoot));
   }
 
   @VisibleForTesting
   static Iterable<String> commonMomczipArguments(ObjcConfiguration configuration) {
     return ImmutableList.of(
         "-XD_MOMC_SDKROOT=" + IosSdkCommands.sdkDir(configuration),
-        "-XD_MOMC_IOS_TARGET_VERSION=" + IosSdkCommands.MINIMUM_OS_VERSION,
+        "-XD_MOMC_IOS_TARGET_VERSION=" + configuration.getMinimumOs(),
         "-MOMC_PLATFORMS", configuration.getPlatform().getLowerCaseNameInPlist(),
         "-XD_MOMC_TARGET_VERSION=10.6");
   }
 
   private static Iterable<Action> momczipActions(ActionConstructionContext context,
-      ObjcBase.Tools baseTools, final ObjcConfiguration objcConfiguration,
+      ObjcRuleClasses.Tools baseTools, final ObjcConfiguration objcConfiguration,
       Iterable<Xcdatamodel> datamodels) {
     ImmutableList.Builder<Action> result = new ImmutableList.Builder<>();
     for (Xcdatamodel datamodel : datamodels) {
       final Artifact outputZip = datamodel.getOutputZip();
       final String archiveRoot = datamodel.archiveRootForMomczip();
       final String container = datamodel.getContainer().getSafePathString();
-      result.add(spawnJavaOnDarwinActionBuilder(context, baseTools.momczipDeployJar())
+      result.add(spawnJavaOnDarwinActionBuilder(baseTools.momczipDeployJar())
+          .setMnemonic("MomCompile")
           .addOutput(outputZip)
           .addInputs(datamodel.getInputs())
           .setCommandLine(new CommandLine() {
@@ -411,13 +427,13 @@ final class ObjcActionsBuilder {
               return new ImmutableList.Builder<String>()
                   .add(outputZip.getExecPathString())
                   .add(archiveRoot)
-                  .add(IosSdkCommands.momcPath(objcConfiguration))
+                  .add(IosSdkCommands.MOMC_PATH)
                   .addAll(commonMomczipArguments(objcConfiguration))
                   .add(container)
                   .build();
             }
           })
-          .build());
+          .build(context));
     }
     return result.build();
   }
@@ -457,17 +473,20 @@ final class ObjcActionsBuilder {
   }
 
   private static final class LinkCommandLine extends CommandLine {
+    private static final Joiner commandJoiner = Joiner.on(' ');
     private final ObjcProvider objcProvider;
     private final ObjcConfiguration objcConfiguration;
     private final Artifact linkedBinary;
+    private final Optional<Artifact> dsymBundle;
     private final ExtraLinkArgs extraLinkArgs;
 
     LinkCommandLine(ObjcConfiguration objcConfiguration, ExtraLinkArgs extraLinkArgs,
-        ObjcProvider objcProvider, Artifact linkedBinary) {
+        ObjcProvider objcProvider, Artifact linkedBinary, Optional<Artifact> dsymBundle) {
       this.objcConfiguration = Preconditions.checkNotNull(objcConfiguration);
       this.extraLinkArgs = Preconditions.checkNotNull(extraLinkArgs);
       this.objcProvider = Preconditions.checkNotNull(objcProvider);
       this.linkedBinary = Preconditions.checkNotNull(linkedBinary);
+      this.dsymBundle = Preconditions.checkNotNull(dsymBundle);
     }
 
     Iterable<String> dylibPaths() {
@@ -481,21 +500,43 @@ final class ObjcActionsBuilder {
 
     @Override
     public Iterable<String> arguments() {
-      return new ImmutableList.Builder<String>()
+      StringBuilder argumentStringBuilder = new StringBuilder();
+
+      Iterable<String> archiveExecPaths = Artifact.toExecPaths(
+          Iterables.concat(objcProvider.get(LIBRARY), objcProvider.get(IMPORTED_LIBRARY)));
+      commandJoiner.appendTo(argumentStringBuilder, new ImmutableList.Builder<String>()
+          .add(objcProvider.is(USES_CPP) ? CLANG_PLUSPLUS.toString() : CLANG.toString())
           .addAll(objcProvider.is(USES_CPP)
               ? ImmutableList.of("-stdlib=libc++") : ImmutableList.<String>of())
           .addAll(IosSdkCommands.commonLinkAndCompileArgsForClang(objcProvider, objcConfiguration))
           .add("-Xlinker", "-objc_abi_version")
           .add("-Xlinker", "2")
           .add("-fobjc-link-runtime")
-          .add("-ObjC")
+          .addAll(IosSdkCommands.DEFAULT_LINKER_FLAGS)
           .addAll(Interspersing.beforeEach("-framework", frameworkNames(objcProvider)))
+          .addAll(Interspersing.beforeEach(
+              "-weak_framework", SdkFramework.names(objcProvider.get(WEAK_SDK_FRAMEWORK))))
           .add("-o", linkedBinary.getExecPathString())
-          .addAll(Artifact.toExecPaths(objcProvider.get(LIBRARY)))
-          .addAll(Artifact.toExecPaths(objcProvider.get(IMPORTED_LIBRARY)))
+          .addAll(archiveExecPaths)
           .addAll(dylibPaths())
           .addAll(extraLinkArgs)
-          .build();
+          .build());
+
+      // Call to dsymutil for debug symbol generation must happen in the link action.
+      // All debug symbol information is encoded in object files inside archive files. To generate
+      // the debug symbol bundle, dsymutil will look inside the linked binary for the encoded
+      // absolute paths to archive files, which are only valid in the link action.
+      for (Artifact justDsymBundle : dsymBundle.asSet()) {
+        argumentStringBuilder.append(" ");
+        commandJoiner.appendTo(argumentStringBuilder, new ImmutableList.Builder<String>()
+            .add("&&")
+            .add(DSYMUTIL.toString())
+            .add(linkedBinary.getExecPathString())
+            .add("-o").add(justDsymBundle.getExecPathString())
+            .build());
+      }
+
+      return ImmutableList.of(argumentStringBuilder.toString());
     }
   }
 
@@ -503,17 +544,23 @@ final class ObjcActionsBuilder {
    * Generates an action to link a binary.
    */
   void registerLinkAction(ActionConstructionContext context, Artifact linkedBinary,
-      ObjcProvider objcProvider, ExtraLinkArgs extraLinkArgs) {
-    register(spawnOnDarwinActionBuilder(context)
-        .setMnemonic("Link")
-        .setExecutable(objcProvider.is(USES_CPP) ? CLANG_PLUSPLUS : CLANG)
+      ObjcProvider objcProvider, ExtraLinkArgs extraLinkArgs, Optional<Artifact> dsymBundle) {
+    extraLinkArgs = new ExtraLinkArgs(Iterables.concat(
+        Interspersing.beforeEach(
+            "-force_load", Artifact.toExecPaths(objcProvider.get(FORCE_LOAD_LIBRARY))),
+        extraLinkArgs));
+    register(spawnOnDarwinActionBuilder()
+        .setMnemonic("ObjcLink")
+        .setShellCommand(ImmutableList.of("/bin/bash", "-c"))
         .setCommandLine(
-            new LinkCommandLine(objcConfiguration, extraLinkArgs, objcProvider, linkedBinary))
+            new LinkCommandLine(objcConfiguration, extraLinkArgs, objcProvider, linkedBinary,
+                dsymBundle))
         .addOutput(linkedBinary)
+        .addOutputs(dsymBundle.asSet())
         .addTransitiveInputs(objcProvider.get(LIBRARY))
         .addTransitiveInputs(objcProvider.get(IMPORTED_LIBRARY))
         .addTransitiveInputs(objcProvider.get(FRAMEWORK_FILE))
-        .build());
+        .build(context));
   }
 
   static final class StringsFiles extends IterableWrapper<CompiledResourceFile> {
@@ -522,20 +569,23 @@ final class ObjcActionsBuilder {
     }
   }
 
-  static final class XibFiles extends IterableWrapper<CompiledResourceFile> {
-    XibFiles(Iterable<CompiledResourceFile> files) {
-      super(files);
-    }
-  }
-
   /**
    * Registers actions for resource conversion that are needed by all rules that inherit from
    * {@link ObjcBase}.
    */
-  void registerResourceActions(ObjcBase.Tools baseTools, StringsFiles stringsFiles,
+  void registerResourceActions(ObjcRuleClasses.Tools baseTools, StringsFiles stringsFiles,
       XibFiles xibFiles, Iterable<Xcdatamodel> datamodels) {
     registerAll(convertStringsActions(context, baseTools, stringsFiles));
-    registerAll(convertXibsActions(context, xibFiles));
+    registerAll(convertXibsActions(baseTools, xibFiles));
     registerAll(momczipActions(context, baseTools, objcConfiguration, datamodels));
+  }
+
+  static LazyString joinExecPaths(final Iterable<Artifact> artifacts) {
+    return new LazyString() {
+      @Override
+      public String toString() {
+        return Artifact.joinExecPaths("\n", artifacts);
+      }
+    };
   }
 }

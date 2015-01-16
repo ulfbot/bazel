@@ -24,7 +24,6 @@ import com.google.devtools.build.lib.actions.cache.MetadataHandler;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.events.EventKind;
-import com.google.devtools.build.lib.pkgcache.PackageUpToDateChecker;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
 import java.io.IOException;
@@ -52,17 +51,14 @@ public class ActionCacheChecker {
   private final ActionCache actionCache;
   private final Predicate<? super Action> executionFilter;
   private final ArtifactResolver artifactResolver;
-  private final PackageUpToDateChecker packageUpToDateChecker;
   // True iff --verbose_explanations flag is set.
   private final boolean verboseExplanations;
 
   public ActionCacheChecker(ActionCache actionCache, ArtifactResolver artifactResolver,
-      PackageUpToDateChecker packageUpToDateChecker, Predicate<? super Action> executionFilter,
-      boolean verboseExplanations) {
+      Predicate<? super Action> executionFilter, boolean verboseExplanations) {
     this.actionCache = actionCache;
     this.executionFilter = executionFilter;
     this.artifactResolver = artifactResolver;
-    this.packageUpToDateChecker = packageUpToDateChecker;
     this.verboseExplanations = verboseExplanations;
   }
 
@@ -122,15 +118,14 @@ public class ActionCacheChecker {
   }
 
   protected boolean unconditionalExecution(Action action) {
-    // TODO(bazel-team): Remove PackageUpToDateChecker.
-    return !isActionExecutionProhibited(action)
-        && action.executeUnconditionally(packageUpToDateChecker);
+    return !isActionExecutionProhibited(action) && action.executeUnconditionally();
   }
 
   /**
-   * Checks whether {@link action} needs to be executed, by seeing if any of its inputs or outputs
-   * have changed. Returns a non-null {@link Token} if the action needs to be executed, and null
-   * otherwise.
+   * Checks whether {@link action} needs to be executed and returns a non-null Token if so.
+   *
+   * <p>The method checks if any of the action's inputs or outputs have changed. Returns a non-null
+   * {@link Token} if the action needs to be executed, and null otherwise.
    *
    * <p>If this method returns non-null, indicating that the action will be executed, the
    * metadataHandler's {@link MetadataHandler#discardMetadata} method must be called, so that it
@@ -138,7 +133,7 @@ public class ActionCacheChecker {
    */
   // Note: the handler should only be used for DEPCHECKER events; there's no
   // guarantee it will be available for other events.
-  public Token needToExecute(Action action, EventHandler handler,
+  public Token getTokenIfNeedToExecute(Action action, EventHandler handler,
       MetadataHandler metadataHandler) {
     // TODO(bazel-team): (2010) For RunfilesAction/SymlinkAction and similar actions that
     // produce only symlinks we should not check whether inputs are valid at all - all that matters
@@ -150,14 +145,10 @@ public class ActionCacheChecker {
     if (middlemanType.isMiddleman()) {
       // Some types of middlemen are not checked because they should not
       // propagate invalidation of their inputs.
-      if (middlemanType != MiddlemanType.SCHEDULING_MIDDLEMAN &&
-          middlemanType != MiddlemanType.TARGET_COMPLETION_MIDDLEMAN &&
-          middlemanType != MiddlemanType.ERROR_PROPAGATING_MIDDLEMAN) {
+      if (middlemanType != MiddlemanType.ERROR_PROPAGATING_MIDDLEMAN) {
         checkMiddlemanAction(action, handler, metadataHandler);
       }
-      if (middlemanType != MiddlemanType.TARGET_COMPLETION_MIDDLEMAN) {
-        return null; // Only target completion middlemen are executed by the builder.
-      }
+      return null;
     }
     ActionCache.Entry entry = null; // Populated lazily.
 
@@ -229,10 +220,11 @@ public class ActionCacheChecker {
     actionCache.put(key, entry);
   }
 
-  protected boolean updateActionInputs(Action action, ActionCache.Entry entry) {
+  protected void updateActionInputs(Action action, ActionCache.Entry entry) {
     if (entry == null || entry.isCorrupted()) {
-      return false;
+      return;
     }
+
     List<PathFragment> outputs = new ArrayList<>();
     for (Artifact output : action.getOutputs()) {
       outputs.add(output.getExecPath());
@@ -247,7 +239,6 @@ public class ActionCacheChecker {
       }
     }
     action.updateInputsFromCache(artifactResolver, inputs);
-    return true;
   }
 
   /**
