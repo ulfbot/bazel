@@ -51,10 +51,6 @@ import com.google.devtools.common.options.OptionsProvider;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.lang.management.GarbageCollectorMXBean;
-import java.lang.management.ManagementFactory;
-import java.lang.management.MemoryMXBean;
-import java.lang.management.MemoryUsage;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.List;
@@ -309,10 +305,10 @@ public class InfoCommand implements BlazeCommand {
         // one GC MXBean, so we just sum them up.
         int gcCount = 0;
         int gcTime = 0;
-        for (GarbageCollectorMXBean gcBean : ManagementFactory.getGarbageCollectorMXBeans()) {
-          gcCount += gcBean.getCollectionCount();
-          gcTime += gcBean.getCollectionTime();
-        }
+//        for (GarbageCollectorMXBean gcBean : ManagementFactory.getGarbageCollectorMXBeans()) {
+//          gcCount += gcBean.getCollectionCount();
+//          gcTime += gcBean.getCollectionTime();
+//        }
         if (key == InfoKey.GC_COUNT) {
           return gcCount + "";
         } else {
@@ -320,16 +316,16 @@ public class InfoCommand implements BlazeCommand {
         }
 
       case MAX_HEAP_SIZE :
-        return StringUtilities.prettyPrintBytes(getMemoryUsage().getMax());
+        return StringUtilities.prettyPrintBytes(Runtime.getRuntime().maxMemory());
       case USED_HEAP_SIZE :
+        return StringUtilities.prettyPrintBytes(Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory());
       case COMMITTED_HEAP_SIZE :
-        return StringUtilities.prettyPrintBytes(key == InfoKey.USED_HEAP_SIZE ?
-            getMemoryUsage().getUsed() : getMemoryUsage().getCommitted());
+        return StringUtilities.prettyPrintBytes(Runtime.getRuntime().totalMemory());
 
       case USED_HEAP_SIZE_AFTER_GC :
         // Note that this info value is not printed by default, but only when explicitly requested.
         System.gc();
-        return StringUtilities.prettyPrintBytes(getMemoryUsage().getUsed());
+        return StringUtilities.prettyPrintBytes(Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory());
 
       case DEFAULTS_PACKAGE:
         return runtime.getDefaultsPackageContent();
@@ -343,11 +339,6 @@ public class InfoCommand implements BlazeCommand {
       default:
         throw new IllegalArgumentException("missing implementation for " + key);
     }
-  }
-
-  private static MemoryUsage getMemoryUsage() {
-    MemoryMXBean memBean = ManagementFactory.getMemoryMXBean();
-    return memBean.getHeapMemoryUsage();
   }
 
   /**

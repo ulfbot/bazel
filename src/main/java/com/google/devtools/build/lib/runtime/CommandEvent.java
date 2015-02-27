@@ -13,11 +13,9 @@
 // limitations under the License.
 package com.google.devtools.build.lib.runtime;
 
-import com.google.devtools.build.lib.util.BlazeClock;
-
-import java.lang.management.GarbageCollectorMXBean;
-import java.lang.management.ManagementFactory;
 import java.util.Date;
+
+import com.google.devtools.build.lib.util.BlazeClock;
 
 /**
  * Base class for Command events that includes some resource fields.
@@ -26,23 +24,10 @@ public abstract class CommandEvent {
 
   private final long eventTimeInNanos;
   private final long eventTimeInEpochTime;
-  private final long gcTimeInMillis;
 
   protected CommandEvent() {
     eventTimeInNanos = BlazeClock.nanoTime();
     eventTimeInEpochTime = new Date().getTime();
-    gcTimeInMillis = collectGcTimeInMillis();
-  }
-
-  /**
-   * Returns time spent in garbage collection since the start of the JVM process.
-   */
-  private static long collectGcTimeInMillis() {
-    long gcTime = 0;
-    for (GarbageCollectorMXBean gcBean : ManagementFactory.getGarbageCollectorMXBeans()) {
-      gcTime += gcBean.getCollectionTime();
-    }
-    return gcTime;
   }
 
   /**
@@ -57,12 +42,5 @@ public abstract class CommandEvent {
    */
   public long getEventTimeInEpochTime() {
     return eventTimeInEpochTime;
-  }
-
-  /**
-   * Get the cumulative GC time for the event.
-   */
-  public long getGCTimeInMillis() {
-    return gcTimeInMillis;
   }
 }

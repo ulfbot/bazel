@@ -102,7 +102,6 @@ public abstract class OutputFormatter implements Serializable {
         new PackageOutputFormatter(),
         new LocationOutputFormatter(),
         new GraphOutputFormatter(),
-        new XmlOutputFormatter(),
         new ProtoOutputFormatter());
   }
 
@@ -132,7 +131,7 @@ public abstract class OutputFormatter implements Serializable {
 
   /**
    * Given a set of query options, returns a BinaryPredicate suitable for
-   * passing to {@link Rule#getLabels()}, {@link XmlOutputFormatter}, etc.
+   * passing to {@link Rule#getLabels()}, {@link OutputFormatter}, etc.
    */
   public static BinaryPredicate<Rule, Attribute> getDependencyFilter(QueryOptions queryOptions) {
     // TODO(bazel-team): Optimize: and(ALL_DEPS, x) -> x, etc.

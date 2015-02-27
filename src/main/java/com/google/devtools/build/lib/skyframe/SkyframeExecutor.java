@@ -83,7 +83,6 @@ import com.google.devtools.build.lib.skyframe.SkyframeActionExecutor.ProgressSup
 import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.ExitCode;
-import com.google.devtools.build.lib.util.ResourceUsage;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.lib.vfs.BatchStat;
 import com.google.devtools.build.lib.vfs.ModifiedFileSet;
@@ -377,7 +376,7 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
             // edges, nokeepGoing builds are not allowed, whereas keepGoing builds are always
             // permitted.
             EvaluationResult<ActionLookupValue> result = buildDriver.evaluate(
-                ImmutableList.of(key), true, ResourceUsage.getAvailableProcessors(),
+                ImmutableList.of(key), true, getAvailableProcessors(),
                 errorEventListener);
             if (!result.hasError()) {
               return Preconditions.checkNotNull(result.get(key), "%s %s", result, key);
@@ -1087,7 +1086,7 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
 
     // Make sure to not run too many analysis threads. This can cause memory thrashing.
     return buildDriver.evaluate(ConfiguredTargetValue.keys(values), keepGoing,
-        ResourceUsage.getAvailableProcessors(), errorEventListener);
+        getAvailableProcessors(), errorEventListener);
   }
 
   /**
@@ -1103,7 +1102,7 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
     // Make sure to not run too many analysis threads. This can cause memory thrashing.
     EvaluationResult<PostConfiguredTargetValue> result =
         buildDriver.evaluate(PostConfiguredTargetValue.keys(values), keepGoing,
-            ResourceUsage.getAvailableProcessors(), errorEventListener);
+            getAvailableProcessors(), errorEventListener);
 
     // Remove all post-configured target values immediately for memory efficiency. We are OK with
     // this mini-phase being non-incremental as the failure mode of action conflict is rare.
@@ -1151,7 +1150,7 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
           @Override
           public Set<Package> call() throws Exception {
             EvaluationResult<PackageValue> result = buildDriver.evaluate(
-                valueNames, false, ResourceUsage.getAvailableProcessors(), errorEventListener);
+                valueNames, false, getAvailableProcessors(), errorEventListener);
             Preconditions.checkState(!result.hasError(),
                 "unexpected errors: %s", result.errorMap());
             Set<Package> packages = Sets.newHashSet();
@@ -1232,7 +1231,7 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
             // failed was a (transitive) dependency of the configured target that should generate
             // this action. We don't expect callers to query generating actions in such cases.
             EvaluationResult<ActionLookupValue> result = buildDriver.evaluate(
-                ImmutableList.of(actionLookupKey), false, ResourceUsage.getAvailableProcessors(),
+                ImmutableList.of(actionLookupKey), false, getAvailableProcessors(),
                 errorEventListener);
             return result.hasError()
                 ? null
@@ -1458,6 +1457,10 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
     }
     injectable().inject(values);
     needToInjectEmbeddedArtifacts = false;
+  }
+
+  private int getAvailableProcessors() {
+    return Runtime.getRuntime().availableProcessors();
   }
 
   /**

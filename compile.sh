@@ -253,7 +253,7 @@ function java_compilation() {
     cat "$paramfile" >&2
   fi
 
-  "${JAVAC}" -classpath "${classpath}" -sourcepath "${sourcepath}" \
+  "${JAVAC}" -profile compact1 -classpath "${classpath}" -sourcepath "${sourcepath}" \
       -d "${output}/classes" -source "$JAVA_VERSION" -target "$JAVA_VERSION" \
       "@${paramfile}" &> "$errfile" ||
       exit $?

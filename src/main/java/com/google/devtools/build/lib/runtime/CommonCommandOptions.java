@@ -190,14 +190,6 @@ public class CommonCommandOptions extends OptionsBase {
           + "hit. Option only has effect if --profile used as well.")
   public boolean recordFullProfilerData;
 
-  @Option(name = "memory_profile",
-      defaultValue = "null",
-      category = "undocumented",
-      converter = OptionsUtils.PathFragmentConverter.class,
-      help = "If set, write memory usage data to the specified "
-          + "file at phase ends.")
-  public PathFragment memoryProfilePath;
-
   @Option(name = "gc_watchdog",
       defaultValue = "false",
       category = "undocumented",
