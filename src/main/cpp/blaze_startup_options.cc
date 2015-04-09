@@ -127,9 +127,9 @@ string BlazeStartupOptions::GetJvm() {
     exit(1);
   }
   // If the full JDK is installed
-  string jdk_rt_jar = GetHostJavabase() + "/jre/lib/rt.jar",
+  string jdk_rt_jar = GetHostJavabase() + "/jre/lib/rt.jar";
   // If just the JRE is installed
-  string jre_rt_jar = GetHostJavabase() + "/lib/rt.jar"
+  string jre_rt_jar = GetHostJavabase() + "/lib/rt.jar";
   if ((access(jdk_rt_jar.c_str(), R_OK) == 0)
       || (access(jre_rt_jar.c_str(), R_OK) == 0)) {
     return java_program;
